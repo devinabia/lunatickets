@@ -48,7 +48,7 @@ Create a `.env` file in the project root directory and add the variables given i
 1. Start the FastAPI server:
 
 ```
-uvicorn main:app --reload
+uvicorn app.routes:app --reload
 ```
 
 The server will start running at `http://localhost:8000`.
