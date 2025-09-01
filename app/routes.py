@@ -320,7 +320,7 @@ class BotRouter:
                     logger.info("Returning immediate acknowledgment to Slack")
                     return {
                         "response_type": "in_channel",
-                        "text": f"{user_name} asked: {text}",
+                        "text": f"⏳ Processing ...",
                     }
 
                 except Exception as e:
