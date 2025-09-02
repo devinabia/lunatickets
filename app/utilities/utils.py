@@ -19,6 +19,155 @@ class Utils:
         self.token = token
         self.session = session
 
+    def get_project_users(self, project_key: str, max_results: int = 50) -> list:
+        """
+        Get list of users who can be assigned to issues in a specific project.
+        Returns list of user objects with displayName, emailAddress, and accountId.
+        """
+        try:
+            # Get users assignable to issues in the project
+            r = self.session.get(
+                f"{self.base_url}/rest/api/3/user/assignable/search",
+                params={"project": project_key, "maxResults": max_results},
+                timeout=20,
+            )
+            r.raise_for_status()
+            users = r.json()
+
+            # Format user data for easier consumption
+            formatted_users = []
+            for user in users:
+                user_data = {
+                    "accountId": user["accountId"],
+                    "displayName": user["displayName"],
+                    "emailAddress": user.get("emailAddress", ""),
+                    "active": user.get("active", True),
+                }
+                formatted_users.append(user_data)
+
+            logger.info(
+                f"Found {len(formatted_users)} assignable users for project {project_key}"
+            )
+            return formatted_users
+
+        except Exception as e:
+            logger.error(f"Error getting project users for {project_key}: {e}")
+            return []
+
+    def find_user_by_name_or_email(self, project_key: str, query: str) -> dict:
+        """
+        Find a user in the project by display name or email address.
+        Returns user data if found, None otherwise.
+        """
+        try:
+            users = self.get_project_users(project_key)
+
+            query_lower = query.lower().strip()
+
+            # First try exact matches
+            for user in users:
+                if user["emailAddress"].lower() == query_lower:
+                    return user
+                if user["displayName"].lower() == query_lower:
+                    return user
+
+            # Then try partial matches
+            for user in users:
+                if query_lower in user["displayName"].lower():
+                    return user
+                if query_lower in user["emailAddress"].lower():
+                    return user
+
+            logger.warning(
+                f"No user found for query '{query}' in project {project_key}"
+            )
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding user '{query}' in project {project_key}: {e}")
+            return None
+
+    def get_user_suggestions_text(self, project_key: str, limit: int = 10) -> str:
+        """
+        Get a formatted text list of available users for assignment suggestions.
+        Used when user assignment fails or when listing available users.
+        """
+        try:
+            users = self.get_project_users(project_key, max_results=limit)
+
+            if not users:
+                return f"No assignable users found for project {project_key}"
+
+            suggestion_lines = [f"Available users in {project_key} project:"]
+            for i, user in enumerate(users[:limit], 1):
+                email_part = (
+                    f" ({user['emailAddress']})" if user["emailAddress"] else ""
+                )
+                suggestion_lines.append(f"{i}. {user['displayName']}{email_part}")
+
+            if len(users) > limit:
+                suggestion_lines.append(f"... and {len(users) - limit} more users")
+
+            return "\n".join(suggestion_lines)
+
+        except Exception as e:
+            logger.error(f"Error generating user suggestions for {project_key}: {e}")
+            return f"Could not retrieve user list for project {project_key}"
+
+    def smart_assign_user(self, project_key: str, assignee_input: str) -> dict:
+        """
+        Intelligently assign a user based on input. Returns assignment info.
+
+        Args:
+            project_key: Jira project key
+            assignee_input: User input (name, email, or partial match)
+
+        Returns:
+            dict with keys: success, accountId, displayName, message, suggestions
+        """
+        try:
+            if not assignee_input or assignee_input.strip().lower() in [
+                "",
+                "unassigned",
+                "none",
+            ]:
+                return {
+                    "success": True,
+                    "accountId": None,
+                    "displayName": "Unassigned",
+                    "message": "Ticket will be left unassigned",
+                }
+
+            # Try to find the user
+            user = self.find_user_by_name_or_email(project_key, assignee_input)
+
+            if user:
+                return {
+                    "success": True,
+                    "accountId": user["accountId"],
+                    "displayName": user["displayName"],
+                    "message": f"Found user: {user['displayName']}",
+                }
+            else:
+                # User not found, provide suggestions
+                suggestions = self.get_user_suggestions_text(project_key)
+                return {
+                    "success": False,
+                    "accountId": None,
+                    "displayName": None,
+                    "message": f"User '{assignee_input}' not found in project {project_key}",
+                    "suggestions": suggestions,
+                }
+
+        except Exception as e:
+            logger.error(f"Error in smart_assign_user: {e}")
+            return {
+                "success": False,
+                "accountId": None,
+                "displayName": None,
+                "message": f"Error finding user: {str(e)}",
+            }
+
     def format_for_slack(self, text: str) -> str:
         """Format response text for Slack markdown."""
         if not text:
@@ -322,6 +471,7 @@ class Utils:
         assignee_email: str = None,
         priority_name: str = None,
         due_date: str = None,
+        start_date: str = None,  # Keep parameter but ignore it
         issue_type_name: str = None,
         labels: list = None,
     ) -> dict:
@@ -345,6 +495,13 @@ class Utils:
 
             fields = {}
 
+            # Track assignment information (same pattern as create_issue_sync)
+            assignment_info = {
+                "assigned": False,
+                "assignee_name": "Unassigned",
+                "suggestions": None,
+            }
+
             # Update summary
             if summary and "summary" in allowed:
                 fields["summary"] = summary.strip().strip("'\"")
@@ -353,16 +510,41 @@ class Utils:
             if description_text and "description" in allowed:
                 fields["description"] = self.text_to_adf(description_text)
 
-            # Update assignee
-            if assignee_email and "assignee" in allowed:
-                try:
-                    if assignee_email.lower() == "unassigned":
-                        fields["assignee"] = None
+            # ENHANCED ASSIGNEE HANDLING (same pattern as create_issue_sync)
+            if assignee_email is not None and "assignee" in allowed:
+                if assignee_email and assignee_email.strip():
+                    assignment_result = self.smart_assign_user(
+                        project_key, assignee_email.strip()
+                    )
+
+                    if assignment_result["success"]:
+                        if assignment_result["accountId"]:
+                            fields["assignee"] = {"id": assignment_result["accountId"]}
+                            assignment_info["assigned"] = True
+                            assignment_info["assignee_name"] = assignment_result[
+                                "displayName"
+                            ]
+                            logger.info(
+                                f"Successfully assigned {issue_key} to: {assignment_result['displayName']}"
+                            )
+                        else:
+                            # If accountId is None, leave unassigned (which is success)
+                            fields["assignee"] = None
+                            assignment_info["assignee_name"] = "Unassigned"
+                            logger.info(f"Leaving {issue_key} unassigned")
                     else:
-                        assignee_id = self.get_account_id(assignee_email)
-                        fields["assignee"] = {"id": assignee_id}
-                except Exception as e:
-                    logger.warning(f"Could not set assignee '{assignee_email}': {e}")
+                        # Assignment failed, but continue with other updates
+                        logger.warning(
+                            f"Could not assign '{assignee_email}' to {issue_key}: {assignment_result['message']}"
+                        )
+                        assignment_info["suggestions"] = assignment_result.get(
+                            "suggestions", ""
+                        )
+                else:
+                    # Empty assignee_email means unassign
+                    fields["assignee"] = None
+                    assignment_info["assignee_name"] = "Unassigned"
+                    logger.info(f"Unassigning {issue_key}")
 
             # Update priority
             if priority_name and "priority" in allowed:
@@ -375,6 +557,14 @@ class Utils:
             # Update due date
             if due_date and "duedate" in allowed:
                 fields["duedate"] = due_date  # Expected format: YYYY-MM-DD
+                logger.info(f"Setting due date to: {due_date}")
+
+            # START DATE HANDLING REMOVED
+            # Log if start date was requested but skip processing
+            if start_date:
+                logger.info(
+                    f"Start date requested ({start_date}) but start date handling is disabled"
+                )
 
             # Update issue type
             if (
@@ -409,21 +599,53 @@ class Utils:
                 )
 
             # Get updated issue details
-            updated = self.get_issue(issue_key)
+            field_list = "summary,description,priority,assignee,reporter,status,duedate"
+            updated = self.get_issue(issue_key, field_list)
+
+            # Determine which fields were actually updated
+            updated_fields = []
+            if summary:
+                updated_fields.append("Summary")
+            if description_text:
+                updated_fields.append("Description")
+            if assignee_email is not None:
+                updated_fields.append("Assignee")
+            if priority_name:
+                updated_fields.append("Priority")
+            if due_date:
+                updated_fields.append("Due Date")
+            # Remove start date from updated fields since we're not handling it
+            if issue_type_name:
+                updated_fields.append("Issue Type")
+            if labels is not None:
+                updated_fields.append("Labels")
+
+            # Extract dates for response
+            response_due_date = updated["fields"].get("duedate")
 
             result = {
                 "success": True,
                 "message": f"Successfully updated Jira issue {issue_key}",
                 "key": issue_key,
                 "summary": updated["fields"]["summary"],
-                "priority": (updated["fields"]["priority"] or {}).get("name"),
+                "priority": (updated["fields"]["priority"] or {}).get("name", "Medium"),
                 "assignee": (updated["fields"]["assignee"] or {}).get(
                     "displayName", "Unassigned"
                 ),
-                "status": (updated["fields"]["status"] or {}).get("name"),
+                "status": (updated["fields"]["status"] or {}).get("name", "To Do"),
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
-                "updated_fields": list(fields.keys()),
+                "updated_fields": updated_fields,
+                "due_date": response_due_date,
+                # Remove start_date from response since we're not handling it
             }
+
+            # Add assignment information if there were issues (same as create_issue_sync)
+            if assignment_info["suggestions"]:
+                result["assignment_failed"] = True
+                result["user_suggestions"] = assignment_info["suggestions"]
+                result["assignment_message"] = (
+                    f"Issue updated but could not assign to '{assignee_email}'"
+                )
 
             logger.info(f"Issue {issue_key} updated successfully")
             return result
