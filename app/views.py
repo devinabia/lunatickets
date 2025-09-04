@@ -47,17 +47,24 @@ class JiraService:
     def _setup_agents(self):
         """Setup all agents and create supervisor."""
 
-        # Create specialized agents
+        # Create specialized agents with simple sprint list tool
         self.create_agent = create_react_agent(
             model=self.model,
-            tools=[self.create_issue_sync],
+            tools=[
+                self.create_issue_sync,
+                self.get_sprint_list_sync,  # Simple sprint list tool
+            ],
             name="jira_create_expert",
             prompt=Prompt.TICKET_CREATION_PROMPT,
         )
 
         self.update_agent = create_react_agent(
             model=self.model,
-            tools=[self.update_issue_sync],
+            tools=[
+                self.update_issue_sync,
+                self.get_sprint_list_sync,  # Sprint list for ongoing sprint detection
+                self.get_project_from_issue_sync,  # Helper to get project from issue key
+            ],
             name="jira_update_expert",
             prompt=Prompt.TICKET_UPDATE_PROMPT,
         )
@@ -83,6 +90,33 @@ class JiraService:
         # Compile the supervisor workflow
         self.app = self.jira_supervisor.compile()
 
+    def get_sprint_list_sync(self, project_name_or_key: str) -> dict:
+        """
+        Get list of sprints for a project. Use this when you need sprint options.
+
+        Args:
+            project_name_or_key: Jira project key (e.g., "SCRUM", "LUNA_TICKETS")
+
+        Returns:
+            dict: Sprint list information
+        """
+        try:
+            project_key = self.utils.resolve_project_key(project_name_or_key)
+            sprint_list = self.utils.get_all_sprints_for_project(project_key)
+
+            return {
+                "success": True,
+                "project_key": project_key,
+                "sprint_list": sprint_list,
+            }
+        except Exception as e:
+            logger.error(f"Error getting sprint list: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "sprint_list": f"Could not get sprints for {project_name_or_key}. Use 'backlog'.",
+            }
+
     def create_issue_sync(
         self,
         project_name_or_key: str,
@@ -92,13 +126,18 @@ class JiraService:
         priority_name: str = None,
         reporter_email: str = None,
         issue_type_name: str = None,
+        sprint_name: str = None,  # NEW: Simple sprint name
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
-        Create a new Jira ticket/issue. Use this tool ONLY after confirming assignee with the user.
+        Create a new Jira ticket/issue. Use this tool ONLY after confirming ALL THREE: project, assignee, AND sprint with the user.
 
-        CRITICAL: DO NOT call this function unless the user has specified who to assign the ticket to.
-        If no assignee mentioned in the user query, ask for assignee first before calling this tool.
+        CRITICAL: DO NOT call this function unless the user has specified:
+        1. Which project to create the ticket in
+        2. Who to assign the ticket to
+        3. Which sprint to add the ticket to (or explicitly said "backlog")
+
+        If ANY of these three pieces are missing, ask for the missing information first before calling this tool.
 
         Args:
             project_name_or_key: Jira project key (REQUIRED - extract from user query/chat history)
@@ -110,31 +149,42 @@ class JiraService:
             priority_name: "High" for urgent, "Medium" for normal, "Low" for minor
             reporter_email: Email of person reporting (leave empty "" for current user)
             issue_type_name: "Bug"/"Task"/"Story"/"Epic" based on request type
+            sprint_name: CONFIRMED sprint name from user (REQUIRED - use None only if user explicitly said "backlog")
+                Examples: "Sprint 1", "LT Sprint 1", None (for backlog only if user confirmed)
             force_update_description_after_create: Keep as True
 
         Returns:
             dict: Comprehensive ticket information with all actual data
 
-        WORKFLOW BEFORE CALLING:
-        1. Check if assignee mentioned in user query
-        2. If NO assignee → Ask user for assignee first, DO NOT call this function
-        3. If assignee mentioned → Call this function immediately
+        WORKFLOW BEFORE CALLING (ALL THREE STEPS REQUIRED):
+        1. Check if PROJECT mentioned in user query
+        - If NO project → Ask user for project first, DO NOT call this function
+        2. Check if ASSIGNEE mentioned in user query
+        - If NO assignee → Ask user for assignee, DO NOT call this function
+        3. Check if SPRINT mentioned in user query
+        - If NO sprint → Ask user for sprint choice, DO NOT call this function
+        4. If ALL THREE present → Call this function immediately
 
-        Examples requiring assignee confirmation first:
+        Examples requiring information gathering first:
+        - "create ticket" → ASK FOR PROJECT
         - "create ticket in LUNA_TICKETS" → ASK FOR ASSIGNEE
-        - "add bug to DevOps project" → ASK FOR ASSIGNEE
-        - "make task for the team" → ASK FOR ASSIGNEE
+        - "create ticket in LUNA_TICKETS assign to john" → ASK FOR SPRINT
+        - "create ticket assign to john" → ASK FOR PROJECT, then SPRINT
 
         Examples ready to create immediately:
-        - "create ticket assign to john in SCRUM" → CALL FUNCTION
-        - "add bug for sarah@company.com" → CALL FUNCTION
-        - "make task assign to me" → CALL FUNCTION
-        - "create unassigned ticket in DevOps" → CALL FUNCTION
+        - "create ticket in SCRUM assign to john sprint Sprint 24" → CALL FUNCTION
+        - "create ticket assign to sarah@company.com backlog in DevOps" → CALL FUNCTION
+        - "make task assign to me LT Sprint 1 in LUNA_TICKETS" → CALL FUNCTION
+        - "create ticket in AI assign to unassigned backlog" → CALL FUNCTION
 
-        Always ask for assignee confirmation before using this tool!
-        always return issue key in response
+        SPRINT PARAMETER USAGE:
+        - sprint_name="Sprint 24" → Adds ticket to Sprint 24
+        - sprint_name="LT Sprint 1" → Adds ticket to LT Sprint 1
+        - sprint_name=None → Adds ticket to backlog (ONLY if user explicitly said "backlog")
+
+        NEVER call this function without confirming project, assignee, AND sprint!
+        Always return issue key in response.
         """
-
         if issue_type_name is None:
             issue_type_name = self.default_issue_type
 
@@ -168,7 +218,7 @@ class JiraService:
             if "description" in allowed and description_text:
                 fields["description"] = self.utils.text_to_adf(description_text)
 
-            # Smart assignee handling
+            # Smart assignee handling (existing code unchanged)
             assignment_info = {
                 "assigned": False,
                 "assignee_name": "Unassigned",
@@ -218,7 +268,7 @@ class JiraService:
 
             # Add labels if supported
             if "labels" in allowed:
-                fields["labels"] = ["created-by-bot"]
+                fields["labels"] = ["created-by-luna"]
 
             logger.info(f"Creating issue with fields: {list(fields.keys())}")
 
@@ -235,6 +285,32 @@ class JiraService:
             created = resp.json()
             issue_key = created.get("key")
             logger.info(f"Successfully created issue: {issue_key}")
+
+            # SIMPLE SPRINT HANDLING - Add your code here
+            sprint_status = "Backlog"
+
+            if sprint_name and sprint_name.strip():
+                # User provided a sprint name, try to use it
+                try:
+                    board_id = self.utils._get_board_id_for_project(project_key)
+                    if not board_id:
+                        raise RuntimeError(f"No board found for project {project_key}")
+                    sprint_id = self.utils._get_sprint_id_by_name(
+                        board_id, sprint_name.strip()
+                    )
+                    if not sprint_id:
+                        raise RuntimeError(
+                            f"{sprint_name.strip()} not found on this board"
+                        )
+                    self.utils._add_issue_to_sprint(sprint_id, issue_key)
+                    sprint_status = sprint_name.strip()
+                    logger.info(
+                        f"Issue {issue_key} moved to sprint {sprint_name.strip()} (id={sprint_id})"
+                    )
+                except Exception as e:
+                    # Non-fatal: we still created the issue; just report sprint move failure
+                    logger.warning(f"Failed to move issue to sprint {sprint_name}: {e}")
+                    sprint_status = f"Backlog (failed to move to {sprint_name.strip()})"
 
             # Force description update if needed
             if (
@@ -269,6 +345,7 @@ class JiraService:
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
+                "sprint": sprint_status,  # NEW: Include sprint info
             }
 
             # Add assignment information if there were issues
@@ -280,7 +357,7 @@ class JiraService:
                 )
 
             logger.info(
-                f"Issue {issue_key} created with status: {result.get('status')}"
+                f"Issue {issue_key} created with status: {result.get('status')} in sprint: {sprint_status}"
             )
             return result
 
@@ -303,6 +380,7 @@ class JiraService:
         start_date: str = None,  # Keep parameter for compatibility but ignore it
         issue_type_name: str = None,
         labels: str = None,  # Comma-separated string
+        sprint_name: str = None,  # Sprint movement support with ongoing detection
     ) -> dict:
         """
         Update an existing Jira ticket/issue. Use this tool when the user wants to:
@@ -312,9 +390,16 @@ class JiraService:
         - Set or update due dates
         - Add or modify labels and tags
         - Change the ticket type or other properties
+        - Move ticket to different sprint or backlog
 
         IMPORTANT: This tool requires a valid issue key. If the user mentions updating
         a ticket but doesn't provide the key, ask them which specific ticket to update.
+
+        SPRINT MOVEMENT: When user wants to move to "ongoing" or "current" sprint:
+        1. Extract project from issue key
+        2. Use get_sprint_list_sync(project) to get available sprints
+        3. Find the sprint marked (ONGOING) and use that specific name
+        4. Call this function with the actual sprint name
 
         Args:
             issue_key: The ticket ID (REQUIRED) - format like "SCRUM-123", "AI-456", "LUNA-789"
@@ -326,17 +411,24 @@ class JiraService:
             start_date: Start date (currently not supported - parameter ignored)
             issue_type_name: "Task", "Bug", "Story", "Epic" to change ticket type (optional)
             labels: Comma-separated labels like "urgent,frontend,api" (optional)
+            sprint_name: Specific sprint name or "backlog" to move ticket (optional)
 
         Returns:
             dict: Updated ticket information including success status and current field values
 
         Examples of when to use this tool:
-            - User says: "Update ticket SCRUM-123 priority to High" → Use this tool
-            - User says: "Assign SCRUM-456 to john@company.com" → Use this tool
-            - User says: "Change summary of AI-789 to include new requirements" → Use this tool
-            - User says: "Set due date for LUNA-100 to 2024-12-31" → Use this tool with due_date
-            - User says: "Add labels 'urgent,critical' to ticket SCRUM-200" → Use this tool
-            - User says: "Make SCRUM-300 unassigned" → Use this tool with assignee_email="unassigned"
+            - User says: "Move LT-23 to Sprint 24" → Use sprint_name="Sprint 24"
+            - User says: "Move SCRUM-456 to backlog" → Use sprint_name="backlog"
+            - User says: "Move LT-23 to ongoing sprint" → Get sprint list first, then use actual ongoing sprint name
+            - User says: "Assign SCRUM-456 to john@company.com" → Use assignee_email
+            - User says: "Change priority of AI-789 to High" → Use priority_name="High"
+
+        WORKFLOW FOR "ONGOING SPRINT" REQUESTS:
+        1. User says "move LT-23 to ongoing sprint"
+        2. Extract project from LT-23 → LUNA_TICKETS
+        3. Call get_sprint_list_sync("LUNA_TICKETS")
+        4. Find sprint marked (ONGOING) → e.g., "LT Sprint 3"
+        5. Call update_issue_sync(issue_key="LT-23", sprint_name="LT Sprint 3")
 
         Do NOT use this tool if:
             - User doesn't provide a specific issue key
@@ -364,6 +456,7 @@ class JiraService:
                 start_date=None,  # Always pass None for start_date
                 issue_type_name=issue_type_name,
                 labels=labels_list,
+                sprint_name=sprint_name,  # Pass sprint name for movement
             )
 
             return result
@@ -374,6 +467,30 @@ class JiraService:
                 "success": False,
                 "error": str(e),
                 "message": f"Failed to update Jira issue: {str(e)}",
+            }
+
+    def get_project_from_issue_sync(self, issue_key: str) -> dict:
+        """
+        Helper tool to get the project key from an issue key.
+        Use this when you need to know which project an issue belongs to.
+
+        Args:
+            issue_key: The ticket ID (e.g., "LT-23", "SCRUM-456")
+
+        Returns:
+            dict: Project information for the issue
+        """
+        try:
+            issue_data = self.utils.get_issue(issue_key, "project")
+            project_key = issue_data["fields"]["project"]["key"]
+
+            return {"success": True, "issue_key": issue_key, "project_key": project_key}
+        except Exception as e:
+            logger.error(f"Error getting project for issue {issue_key}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Could not find project for issue {issue_key}",
             }
 
     def delete_issue_sync(self, issue_key: str) -> dict:

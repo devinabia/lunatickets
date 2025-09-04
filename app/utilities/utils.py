@@ -463,6 +463,52 @@ class Utils:
         r.raise_for_status()
         return r.json()
 
+    def _remove_issue_from_all_sprints(self, issue_key: str, project_key: str) -> None:
+        """
+        Remove an issue from all sprints (moves to backlog).
+        Required for sprint movement functionality.
+        """
+        try:
+            board_id = self._get_board_id_for_project(project_key)
+            if not board_id:
+                logger.warning(f"No board found for project {project_key}")
+                return
+            
+            # Get all sprints that might contain this issue
+            start_at = 0
+            while True:
+                r = self.session.get(
+                    f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
+                    params={"startAt": start_at, "maxResults": 50, "state": "active,future"},
+                    timeout=30
+                )
+                r.raise_for_status()
+                data = r.json()
+                
+                for sprint in data.get("values", []):
+                    try:
+                        # Try to remove issue from this sprint (will silently fail if not in sprint)
+                        remove_url = f"{self.base_url}/rest/agile/1.0/sprint/{sprint['id']}/issue"
+                        self.session.post(
+                            remove_url,
+                            json={"issues": [issue_key]},
+                            timeout=20
+                        )
+                    except Exception:
+                        # Ignore errors - issue might not be in this sprint
+                        pass
+                
+                if data.get("isLast") or not data.get("values"):
+                    break
+                start_at += len(data.get("values", []))
+            
+            logger.info(f"Removed {issue_key} from all active/future sprints")
+            
+        except Exception as e:
+            logger.warning(f"Error removing {issue_key} from sprints: {e}")
+            # Non-fatal error - continue with the operation
+
+
     def update_issue(
         self,
         issue_key: str,
@@ -474,8 +520,9 @@ class Utils:
         start_date: str = None,  # Keep parameter but ignore it
         issue_type_name: str = None,
         labels: list = None,
+        sprint_name: str = None,  # NEW: Sprint movement parameter
     ) -> dict:
-        """Update existing Jira issue with new field values."""
+        """Update existing Jira issue with new field values including sprint movement."""
         try:
             # Get current issue to validate it exists
             current_issue = self.get_issue(issue_key, "project,issuetype")
@@ -578,25 +625,59 @@ class Utils:
             if labels is not None and "labels" in allowed:
                 fields["labels"] = labels
 
-            if not fields:
+            if not fields and not sprint_name:
                 return {
                     "success": False,
                     "message": "No valid fields provided for update or fields not allowed for this issue type",
                 }
 
-            logger.info(
-                f"Updating issue {issue_key} with fields: {list(fields.keys())}"
-            )
-
-            # Update the issue
-            update_url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
-            resp = self.session.put(update_url, json={"fields": fields}, timeout=30)
-
-            if not resp.ok:
-                logger.error(f"Update failed: {resp.status_code} - {resp.text}")
-                raise RuntimeError(
-                    f"Jira update failed {resp.status_code}: {resp.text}"
+            # Handle regular field updates first
+            if fields:
+                logger.info(
+                    f"Updating issue {issue_key} with fields: {list(fields.keys())}"
                 )
+
+                # Update the issue
+                update_url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
+                resp = self.session.put(update_url, json={"fields": fields}, timeout=30)
+
+                if not resp.ok:
+                    logger.error(f"Update failed: {resp.status_code} - {resp.text}")
+                    raise RuntimeError(
+                        f"Jira update failed {resp.status_code}: {resp.text}"
+                    )
+
+            # NEW: HANDLE SPRINT MOVEMENT
+            sprint_status = None
+            sprint_updated = False
+            
+            if sprint_name is not None:
+                try:
+                    if sprint_name.lower().strip() == "backlog":
+                        # Move to backlog (remove from all sprints)
+                        self._remove_issue_from_all_sprints(issue_key, project_key)
+                        sprint_status = "Backlog"
+                        sprint_updated = True
+                        logger.info(f"Moved {issue_key} to backlog")
+                    else:
+                        # Move to specific sprint
+                        board_id = self._get_board_id_for_project(project_key)
+                        if not board_id:
+                            raise RuntimeError(f"No board found for project {project_key}")
+                        sprint_id = self._get_sprint_id_by_name(board_id, sprint_name.strip())
+                        if not sprint_id:
+                            raise RuntimeError(f"{sprint_name.strip()} not found on this board")
+                        
+                        # Remove from current sprints and add to new one
+                        self._remove_issue_from_all_sprints(issue_key, project_key)
+                        self._add_issue_to_sprint(sprint_id, issue_key)
+                        sprint_status = sprint_name.strip()
+                        sprint_updated = True
+                        logger.info(f"Moved {issue_key} to sprint {sprint_name.strip()}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to move {issue_key} to sprint {sprint_name}: {e}")
+                    sprint_status = f"Sprint move failed: {str(e)}"
 
             # Get updated issue details
             field_list = "summary,description,priority,assignee,reporter,status,duedate"
@@ -614,11 +695,12 @@ class Utils:
                 updated_fields.append("Priority")
             if due_date:
                 updated_fields.append("Due Date")
-            # Remove start date from updated fields since we're not handling it
             if issue_type_name:
                 updated_fields.append("Issue Type")
             if labels is not None:
                 updated_fields.append("Labels")
+            if sprint_updated:
+                updated_fields.append("Sprint")
 
             # Extract dates for response
             response_due_date = updated["fields"].get("duedate")
@@ -636,8 +718,11 @@ class Utils:
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
                 "updated_fields": updated_fields,
                 "due_date": response_due_date,
-                # Remove start_date from response since we're not handling it
             }
+
+            # Add sprint info if sprint was updated
+            if sprint_updated and sprint_status:
+                result["sprint"] = sprint_status
 
             # Add assignment information if there were issues (same as create_issue_sync)
             if assignment_info["suggestions"]:
@@ -698,3 +783,108 @@ class Utils:
                 "error": str(e),
                 "message": f"Failed to delete Jira issue {issue_key}: {str(e)}",
             }
+
+    def _get_board_id_for_project(self, project_key: str) -> int:
+        """Find a board that includes this project (scrum/kanban). Prefer scrum."""
+        url = f"{self.base_url}/rest/agile/1.0/board"
+        r = self.session.get(
+            url, params={"projectKeyOrId": project_key, "maxResults": 50}, timeout=30
+        )
+        r.raise_for_status()
+        boards = r.json().get("values", [])
+        if not boards:
+            return None
+        # Prefer scrum boards (they have sprints)
+        scrum = [b for b in boards if b.get("type") == "scrum"]
+        return scrum[0]["id"] if scrum else boards[0]["id"]
+
+    def _add_issue_to_sprint(self, sprint_id: int, issue_key: str) -> None:
+        """Move an issue into the given sprint."""
+        r = self.session.post(
+            f"{self.base_url}/rest/agile/1.0/sprint/{sprint_id}/issue",
+            json={"issues": [issue_key]},
+            timeout=30,
+        )
+        r.raise_for_status()
+
+    def _get_sprint_id_by_name(self, board_id: int, sprint_name: str) -> int:
+        """Find a sprint by exact name on the given board (active/future/closed scanned)."""
+        start_at = 0
+        while True:
+            r = self.session.get(
+                f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
+                params={
+                    "startAt": start_at,
+                    "maxResults": 50,
+                    "state": "active,future,closed",
+                },
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+            for s in data.get("values", []):
+                if s.get("name", "").strip().lower() == sprint_name.strip().lower():
+                    return s["id"]
+            if data.get("isLast") or not data.get("values"):
+                break
+            start_at += len(data.get("values", []))
+        return None
+
+
+    def get_all_sprints_for_project(self, project_key: str) -> str:
+        """
+        Get all sprints for a project ordered by latest on top with status.
+        Returns formatted string for AI to choose from.
+        """
+        try:
+            board_id = self._get_board_id_for_project(project_key)
+            if not board_id:
+                return f"No board found for project {project_key}. Use 'backlog' for no sprint."
+            
+            # Get all sprints (active, future, closed)
+            all_sprints = []
+            start_at = 0
+            
+            while True:
+                r = self.session.get(
+                    f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
+                    params={"startAt": start_at, "maxResults": 50, "state": "active,future,closed"},
+                    timeout=30
+                )
+                r.raise_for_status()
+                data = r.json()
+                
+                for sprint in data.get("values", []):
+                    all_sprints.append({
+                        "id": sprint["id"],
+                        "name": sprint["name"],
+                        "state": sprint["state"],
+                        "startDate": sprint.get("startDate"),
+                        "endDate": sprint.get("endDate")
+                    })
+                
+                if data.get("isLast") or not data.get("values"):
+                    break
+                start_at += len(data.get("values", []))
+            
+            # Sort by ID descending (latest first)
+            all_sprints.sort(key=lambda x: x["id"], reverse=True)
+            
+            # Format for AI
+            sprint_options = [f"Available sprints for {project_key}:"]
+            sprint_options.append("- backlog (no specific sprint)")
+            
+            for sprint in all_sprints[:10]:  # Limit to 10 latest sprints
+                status_marker = ""
+                if sprint["state"] == "active":
+                    status_marker = " (ONGOING)"
+                elif sprint["state"] == "future":
+                    status_marker = " (upcoming)"
+                
+                sprint_options.append(f"- {sprint['name']}{status_marker}")
+            
+            return "\n".join(sprint_options)
+            
+        except Exception as e:
+            logger.error(f"Error getting sprints for {project_key}: {e}")
+            return f"Could not retrieve sprints for {project_key}. Use 'backlog' for no sprint."
