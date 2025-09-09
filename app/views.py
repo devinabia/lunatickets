@@ -241,53 +241,38 @@ class JiraService:
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
-        Create a new Jira ticket/issue. Use this tool when you have assignee information.
+        Create a new Jira ticket/issue.
+
+        CRITICAL REQUIREMENT: assignee_email is MANDATORY and must not be empty.
+
+        This function will FAIL and return an error if no assignee is provided.
+        Do NOT call this function unless you have a valid assignee_email.
+
+        If the user doesn't specify who to assign the ticket to, ask them first:
+        "Who should I assign this ticket to?"
 
         Args:
-            assignee_email: Who to assign to (REQUIRED)
+            assignee_email: REQUIRED - Who to assign to (cannot be empty)
             project_name_or_key: Project key (optional - defaults to "AI")
-            sprint_name: Sprint name or None for backlog (optional - defaults to upcoming sprint OR asks user)
             summary: Ticket title (optional - auto-generated if empty)
             description_text: Ticket description (optional - auto-generated if empty)
+            priority_name: Priority level (optional)
+            reporter_email: Who reported it (optional)
+            issue_type_name: Issue type (optional - defaults to "Task")
+            sprint_name: Sprint name or None for backlog (optional)
+            force_update_description_after_create: Whether to force description update (optional)
 
-        PARSING RULES:
-        - Look for assignee: "assign to X", "assign this to X", "for X"
-        - Look for sprint: "Sprint X", "backlog", "new sprint", "ongoing"
-        - Look for project: "in PROJECT", "PROJECT project"
-        - Missing assignee? Ask for assignee
-        - Missing sprint? Use upcoming sprint OR ask user if none available
+        Returns:
+            dict: Either success with ticket details OR error asking for assignee
 
-        EXAMPLES:
-        Ready to create (has assignee):
-        - "create ticket assign to fahad" → Uses upcoming sprint automatically
-        - "create ticket assign to john backlog" → Uses backlog explicitly
-        - "create ticket and assign this ticket to fahad" → Uses upcoming sprint automatically
-        - "create ticket in SCRUM assign to sarah" → Uses SCRUM project + upcoming sprint
+        Examples:
+            ✅ CORRECT USAGE:
+            - User: "create ticket assign to john" → call with assignee_email="john"
+            - User: "make story for sarah" → call with assignee_email="sarah"
 
-        Missing assignee only:
-        - "create ticket in backlog" → ASK FOR ASSIGNEE
-        - "create ticket Sprint 24" → ASK FOR ASSIGNEE
-        - "create ticket" → ASK FOR ASSIGNEE
-
-        Sprint selection flow (when no upcoming sprint exists):
-        - "create ticket assign to john" → Show sprint options → User picks → Create
-
-        SMART DEFAULTS:
-        - Project: "AI" (when not specified)
-        - Sprint: Upcoming sprint (when available) OR ask user to choose
-        - Summary: Auto-generated (when empty)
-        - Description: Auto-generated (when empty)
-
-        WORKFLOW:
-        1. Parse for assignee (REQUIRED)
-        2. Parse for project (optional, defaults to "AI")
-        3. Parse for sprint (optional, uses upcoming sprint or asks user)
-        4. If assignee found → Create ticket (may return sprint options if no upcoming sprint)
-        5. If no assignee → Ask for assignee
-
-        Returns either:
-        - Success response with created ticket details
-        - Sprint selection prompt (needs_sprint_selection: true) when no upcoming sprint
+            ❌ INCORRECT USAGE:
+            - User: "create story" → DON'T call this function, ask for assignee instead
+            - User: "make ticket" → DON'T call this function, ask for assignee instead
         """
         if issue_type_name is None:
             issue_type_name = self.default_issue_type
