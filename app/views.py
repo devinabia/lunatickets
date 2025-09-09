@@ -117,83 +117,217 @@ class JiraService:
                 "sprint_list": f"Could not get sprints for {project_name_or_key}. Use 'backlog'.",
             }
 
+    def get_default_sprint_for_project(self, project_key: str) -> dict:
+        """
+        Get the default sprint for a project (the immediate next sprint after ongoing).
+        Uses sprint name parsing to determine chronological order.
+        """
+        try:
+            # Use your existing method to get sprint list
+            sprint_info = self.get_sprint_list_sync(project_key)
+
+            if not sprint_info["success"]:
+                logger.warning(f"Could not get sprints for {project_key}")
+                return {
+                    "has_default": False,
+                    "sprint_name": None,
+                    "ask_user": True,
+                    "sprint_list": f"Could not get sprints for {project_key}. Use 'backlog'.",
+                }
+
+            sprint_list = sprint_info["sprint_list"]
+
+            # Get the actual sprint data using your existing utils method
+            board_id = self.utils._get_board_id_for_project(project_key)
+            if not board_id:
+                logger.warning(f"No board found for project {project_key}")
+                return {
+                    "has_default": False,
+                    "sprint_name": None,
+                    "ask_user": True,
+                    "sprint_list": sprint_list,
+                }
+
+            # Get all active and future sprints with full details
+            r = self.session.get(
+                f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
+                params={"state": "active,future", "maxResults": 50},
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            ongoing_sprint = None
+            future_sprints = []
+
+            # Separate ongoing and future sprints
+            for sprint in data.get("values", []):
+                if sprint["state"] == "active":
+                    ongoing_sprint = sprint
+                elif sprint["state"] == "future":
+                    future_sprints.append(sprint)
+
+            if not future_sprints:
+                logger.info(f"No future sprints found for {project_key}, will ask user")
+                return {
+                    "has_default": False,
+                    "sprint_name": None,
+                    "ask_user": True,
+                    "sprint_list": sprint_list,
+                }
+
+            # Custom sorting function for sprint names like "AI -- W36-Y25", "AI -- W37-Y26"
+            def extract_week_number(sprint_name):
+                """Extract week number from sprint name for sorting."""
+                try:
+                    # Look for pattern like "W36" in the name
+                    import re
+
+                    match = re.search(r"W(\d+)", sprint_name)
+                    if match:
+                        return int(match.group(1))
+
+                    # Fallback: try to extract any number from the name
+                    numbers = re.findall(r"\d+", sprint_name)
+                    if numbers:
+                        return int(numbers[0])
+
+                    # Final fallback: use sprint ID
+                    return 0
+                except:
+                    return 0
+
+            # Sort future sprints by week number extracted from name
+            future_sprints.sort(key=lambda x: extract_week_number(x["name"]))
+
+            # Log the sorting for debugging
+            logger.info(f"Future sprints sorted order:")
+            for sprint in future_sprints:
+                week_num = extract_week_number(sprint["name"])
+                logger.info(f"  - {sprint['name']} (week {week_num})")
+
+            # The first future sprint after sorting is the immediate next one
+            next_sprint = future_sprints[0]
+
+            logger.info(
+                f"Using immediate next sprint as default: {next_sprint['name']}"
+            )
+            return {
+                "has_default": True,
+                "sprint_name": next_sprint["name"],
+                "ask_user": False,
+                "sprint_list": sprint_list,
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting default sprint for {project_key}: {e}")
+            return {
+                "has_default": False,
+                "sprint_name": None,
+                "ask_user": True,
+                "sprint_list": f"Could not get sprints for {project_key}. Use 'backlog'.",
+            }
+
     def create_issue_sync(
         self,
-        project_name_or_key: str = "",  # Made optional with default empty string
+        project_name_or_key: str = "",
         summary: str = "",
         description_text: str = "",
         assignee_email: str = "",
         priority_name: str = None,
         reporter_email: str = None,
         issue_type_name: str = None,
-        sprint_name: str = None,  # NEW: Simple sprint name
+        sprint_name: str = None,
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
-        Create a new Jira ticket/issue. Use this tool ONLY after confirming assignee AND sprint with the user.
-
-        CRITICAL: DO NOT call this function unless the user has specified:
-        1. Who to assign the ticket to (REQUIRED)
-        2. Which sprint to add the ticket to (or explicitly said "backlog") (REQUIRED)
-        3. Project is OPTIONAL - will use "AI" as default if not specified
+        Create a new Jira ticket/issue. Use this tool when you have assignee information.
 
         Args:
-            project_name_or_key: Jira project key (OPTIONAL - defaults to "AI")
-                Examples: "SCRUM", "LUNA_TICKETS", "DevOps", etc.
-                If empty or not provided, will use "AI" as default
-            summary: Clear, concise title for the ticket (required)
-            description_text: Detailed description of the issue/task (required)
-            assignee_email: CONFIRMED assignee from user (REQUIRED - never empty)
-                Examples: "john", "john@company.com", "John Smith", "me", "unassigned"
-            priority_name: "High" for urgent, "Medium" for normal, "Low" for minor
-            reporter_email: Email of person reporting (leave empty "" for current user)
-            issue_type_name: "Bug"/"Task"/"Story"/"Epic" based on request type
-            sprint_name: CONFIRMED sprint name from user (REQUIRED - use None only if user explicitly said "backlog")
-                Examples: "Sprint 1", "LT Sprint 1", None (for backlog only if user confirmed)
-            force_update_description_after_create: Keep as True
+            assignee_email: Who to assign to (REQUIRED)
+            project_name_or_key: Project key (optional - defaults to "AI")
+            sprint_name: Sprint name or None for backlog (optional - defaults to upcoming sprint OR asks user)
+            summary: Ticket title (optional - auto-generated if empty)
+            description_text: Ticket description (optional - auto-generated if empty)
 
-        Returns:
-            dict: Comprehensive ticket information with all actual data
+        PARSING RULES:
+        - Look for assignee: "assign to X", "assign this to X", "for X"
+        - Look for sprint: "Sprint X", "backlog", "new sprint", "ongoing"
+        - Look for project: "in PROJECT", "PROJECT project"
+        - Missing assignee? Ask for assignee
+        - Missing sprint? Use upcoming sprint OR ask user if none available
 
-        WORKFLOW BEFORE CALLING (BOTH STEPS REQUIRED):
-        1. Check if ASSIGNEE mentioned in user query
-        - If NO assignee → Ask user for assignee, DO NOT call this function
-        2. Check if SPRINT mentioned in user query
-        - If NO sprint → Ask user for sprint choice, DO NOT call this function
-        3. If BOTH present → Call this function immediately
+        EXAMPLES:
+        Ready to create (has assignee):
+        - "create ticket assign to fahad" → Uses upcoming sprint automatically
+        - "create ticket assign to john backlog" → Uses backlog explicitly
+        - "create ticket and assign this ticket to fahad" → Uses upcoming sprint automatically
+        - "create ticket in SCRUM assign to sarah" → Uses SCRUM project + upcoming sprint
 
-        Examples requiring information gathering first:
-        - "create ticket" → ASK FOR ASSIGNEE
-        - "create ticket assign to john" → ASK FOR SPRINT
+        Missing assignee only:
         - "create ticket in backlog" → ASK FOR ASSIGNEE
+        - "create ticket Sprint 24" → ASK FOR ASSIGNEE
+        - "create ticket" → ASK FOR ASSIGNEE
 
-        Examples ready to create immediately (with default "AI" project):
-        - "create ticket assign to john sprint Sprint 24" → CALL FUNCTION (project="AI")
-        - "create ticket assign to sarah@company.com backlog" → CALL FUNCTION (project="AI")
-        - "make task assign to me LT Sprint 1" → CALL FUNCTION (project="AI")
+        Sprint selection flow (when no upcoming sprint exists):
+        - "create ticket assign to john" → Show sprint options → User picks → Create
 
-        Examples with specified project:
-        - "create ticket in SCRUM assign to john sprint Sprint 24" → CALL FUNCTION (project="SCRUM")
-        - "create ticket assign to sarah@company.com backlog in DevOps" → CALL FUNCTION (project="DevOps")
+        SMART DEFAULTS:
+        - Project: "AI" (when not specified)
+        - Sprint: Upcoming sprint (when available) OR ask user to choose
+        - Summary: Auto-generated (when empty)
+        - Description: Auto-generated (when empty)
 
-        SPRINT PARAMETER USAGE:
-        - sprint_name="Sprint 24" → Adds ticket to Sprint 24
-        - sprint_name="LT Sprint 1" → Adds ticket to LT Sprint 1
-        - sprint_name=None → Adds ticket to backlog (ONLY if user explicitly said "backlog")
+        WORKFLOW:
+        1. Parse for assignee (REQUIRED)
+        2. Parse for project (optional, defaults to "AI")
+        3. Parse for sprint (optional, uses upcoming sprint or asks user)
+        4. If assignee found → Create ticket (may return sprint options if no upcoming sprint)
+        5. If no assignee → Ask for assignee
 
-        NEVER call this function without confirming assignee AND sprint!
-        Always return issue key in response.
+        Returns either:
+        - Success response with created ticket details
+        - Sprint selection prompt (needs_sprint_selection: true) when no upcoming sprint
         """
         if issue_type_name is None:
             issue_type_name = self.default_issue_type
 
-        # Use default project if not provided or empty
+        # Use default project if not provided
         if not project_name_or_key or project_name_or_key.strip() == "":
             project_name_or_key = self.default_project
-            logger.info(
-                f"No project specified, using default project: {self.default_project}"
-            )
+            logger.info(f"No project specified, using default: {self.default_project}")
 
+        # Handle sprint selection with user fallback
+        if not sprint_name:
+            sprint_info = self.get_default_sprint_for_project(project_name_or_key)
+
+            if sprint_info["has_default"]:
+                # Use the upcoming sprint as default
+                sprint_name = sprint_info["sprint_name"]
+                logger.info(f"Using default upcoming sprint: {sprint_name}")
+            else:
+                # No upcoming sprint available - ask user to choose
+                logger.info(
+                    f"No upcoming sprint available for {project_name_or_key}, asking user"
+                )
+                return {
+                    "success": False,
+                    "needs_sprint_selection": True,
+                    "message": f"Which sprint should I add this ticket to? Here are the available options:\n\n{sprint_info['sprint_list']}\n\nPlease specify the exact sprint name or 'backlog'.",
+                    "project": project_name_or_key,
+                    "assignee": assignee_email,
+                    "sprint_options": sprint_info["sprint_list"],
+                }
+
+        # Generate default summary if empty
+        if not summary or summary.strip() == "":
+            summary = "New ticket created via AI assistant"
+
+        # Generate default description if empty
+        if not description_text or description_text.strip() == "":
+            description_text = "This ticket was created through the AI assistant and needs further details to be added."
+
+        # Rest of your existing create_issue_sync code remains exactly the same...
         try:
             project_key = self.utils.resolve_project_key(project_name_or_key)
             normalized_issue_type = self.utils.normalize_issue_type(
@@ -216,7 +350,7 @@ class JiraService:
             if "description" in allowed and description_text:
                 fields["description"] = self.utils.text_to_adf(description_text)
 
-            # Smart assignee handling (existing code unchanged)
+            # Smart assignee handling
             assignment_info = {
                 "assigned": False,
                 "assignee_name": "Unassigned",
@@ -238,9 +372,7 @@ class JiraService:
                         logger.info(
                             f"Successfully assigned to: {assignment_result['displayName']}"
                         )
-                    # If accountId is None, leave unassigned (which is success)
                 else:
-                    # Assignment failed, but continue with ticket creation
                     logger.warning(
                         f"Could not assign to '{assignee_email}': {assignment_result['message']}"
                     )
@@ -284,11 +416,10 @@ class JiraService:
             issue_key = created.get("key")
             logger.info(f"Successfully created issue: {issue_key}")
 
-            # SIMPLE SPRINT HANDLING - Add your code here
+            # SPRINT HANDLING
             sprint_status = "Backlog"
 
             if sprint_name and sprint_name.strip():
-                # User provided a sprint name, try to use it
                 try:
                     board_id = self.utils._get_board_id_for_project(project_key)
                     if not board_id:
@@ -306,7 +437,6 @@ class JiraService:
                         f"Issue {issue_key} moved to sprint {sprint_name.strip()} (id={sprint_id})"
                     )
                 except Exception as e:
-                    # Non-fatal: we still created the issue; just report sprint move failure
                     logger.warning(f"Failed to move issue to sprint {sprint_name}: {e}")
                     sprint_status = f"Backlog (failed to move to {sprint_name.strip()})"
 
@@ -343,8 +473,8 @@ class JiraService:
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
-                "sprint": sprint_status,  # NEW: Include sprint info
-                "project": project_key,  # Include which project was used
+                "sprint": sprint_status,
+                "project": project_key,
             }
 
             # Add assignment information if there were issues

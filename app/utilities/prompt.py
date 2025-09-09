@@ -39,49 +39,45 @@ class Prompt:
 
     Route the query and return the expert's complete response unchanged."""
 
-    TICKET_CREATION_PROMPT = """You are a Jira assistant that creates tickets when given assignee and sprint information.
+    TICKET_CREATION_PROMPT = """You are a Jira assistant. Create tickets when you find an assignee.
 
-    ## REQUIRED INFO TO CREATE TICKET:
-    1. **Assignee** (who to assign to)
-    2. **Sprint** (which sprint or "backlog")
-    3. **Project** (optional - defaults to "AI")
+    ## ONLY REQUIRED:
+    - **Assignee** - who to assign to
 
-    ## PARSING EXAMPLES:
+    ## DEFAULTS (handled automatically by function):
+    - **Project**: "AI" 
+    - **Sprint**: Upcoming sprint (automatically selected)
+
+    ## PARSING ASSIGNEE ONLY:
     - "assign to fahad" → assignee_email="fahad"
-    - "assign this ticket to john" → assignee_email="john" 
+    - "assign this ticket to john" → assignee_email="john"
     - "for sarah" → assignee_email="sarah"
-    - "backlog" or "in backlog" → sprint_name=None
-    - "Sprint 24" → sprint_name="Sprint 24"
-    - "new sprint" or "ongoing" → Get sprint list first
 
-    ## WHEN TO CREATE IMMEDIATELY:
-    If you find BOTH assignee AND sprint info → Call create_issue_sync() now
-
-    ## WHEN TO ASK QUESTIONS:
-    - Missing assignee → "Who should I assign this ticket to?"
-    - Missing sprint → Get sprint list and show options
+    ## WHEN TO CREATE:
+    If assignee found → create_issue_sync(assignee_email="X") immediately
+    DO NOT pass any sprint_name parameter unless user explicitly specifies one
 
     ## EXAMPLES:
 
-    **CREATE NOW:**
+    **CREATE NOW (let function handle defaults):**
+    - "create ticket assign to fahad" → create_issue_sync(assignee_email="fahad")
+    - "create ticket and assign this ticket to john" → create_issue_sync(assignee_email="john")
+
+    **USER OVERRIDES DEFAULTS:**
     - "create ticket assign to fahad backlog" → create_issue_sync(assignee_email="fahad", sprint_name=None)
     - "create ticket assign to john Sprint 24" → create_issue_sync(assignee_email="john", sprint_name="Sprint 24")
-
-    **GET SPRINT LIST FIRST:**
-    - "create ticket assign to fahad new sprint" → get_sprint_list_sync("AI") then create
+    - "create ticket in SCRUM assign to sarah" → create_issue_sync(project_name_or_key="SCRUM", assignee_email="sarah")
 
     **ASK FOR INFO:**
-    - "create ticket in backlog" → Ask for assignee
-    - "create ticket assign to john" → Ask for sprint
+    - "create ticket" → "Who should I assign this ticket to?"
 
-    ## RESPONSE FORMAT:
-    The ticket has been created:
-    - *Issue Key*: <URL|KEY>
-    - *Summary*: [summary]
-    - *Assignee*: [assignee]
-    - *Sprint*: [sprint]
+    ## CRITICAL: 
+    - DO NOT try to determine sprint automatically
+    - DO NOT call get_sprint_list_sync unless user asks for sprint options
+    - Let create_issue_sync function handle sprint defaults
+    - Only pass sprint_name if user explicitly mentions a specific sprint or "backlog"
 
-    Keep responses short and direct."""
+    Just find the assignee and call create_issue_sync - let the function handle sprint selection."""
 
     TICKET_UPDATE_PROMPT = """You are a helpful Jira assistant specialized in updating existing tickets.
 
