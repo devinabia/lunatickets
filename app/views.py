@@ -29,7 +29,7 @@ class JiraService:
         self.email = os.getenv("JIRA_EMAIL")
         self.token = os.getenv("JIRA_TOKEN")
         self.default_issue_type = "Task"
-        self.default_project = "LUNA_TICKETS"
+        self.default_project = "AI"
 
         # Session for Jira API calls
         self.session = requests.Session()
@@ -119,9 +119,9 @@ class JiraService:
 
     def create_issue_sync(
         self,
-        project_name_or_key: str,
-        summary: str,
-        description_text: str,
+        project_name_or_key: str = "",  # Made optional with default empty string
+        summary: str = "",
+        description_text: str = "",
         assignee_email: str = "",
         priority_name: str = None,
         reporter_email: str = None,
@@ -130,18 +130,17 @@ class JiraService:
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
-        Create a new Jira ticket/issue. Use this tool ONLY after confirming ALL THREE: project, assignee, AND sprint with the user.
+        Create a new Jira ticket/issue. Use this tool ONLY after confirming assignee AND sprint with the user.
 
         CRITICAL: DO NOT call this function unless the user has specified:
-        1. Which project to create the ticket in
-        2. Who to assign the ticket to
-        3. Which sprint to add the ticket to (or explicitly said "backlog")
-
-        If ANY of these three pieces are missing, ask for the missing information first before calling this tool.
+        1. Who to assign the ticket to (REQUIRED)
+        2. Which sprint to add the ticket to (or explicitly said "backlog") (REQUIRED)
+        3. Project is OPTIONAL - will use "AI" as default if not specified
 
         Args:
-            project_name_or_key: Jira project key (REQUIRED - extract from user query/chat history)
-                Examples: "SCRUM", "LUNA_TICKETS", "DevOps", "AI", etc.
+            project_name_or_key: Jira project key (OPTIONAL - defaults to "AI")
+                Examples: "SCRUM", "LUNA_TICKETS", "DevOps", etc.
+                If empty or not provided, will use "AI" as default
             summary: Clear, concise title for the ticket (required)
             description_text: Detailed description of the issue/task (required)
             assignee_email: CONFIRMED assignee from user (REQUIRED - never empty)
@@ -156,33 +155,33 @@ class JiraService:
         Returns:
             dict: Comprehensive ticket information with all actual data
 
-        WORKFLOW BEFORE CALLING (ALL THREE STEPS REQUIRED):
-        1. Check if PROJECT mentioned in user query
-        - If NO project → Ask user for project first, DO NOT call this function
-        2. Check if ASSIGNEE mentioned in user query
+        WORKFLOW BEFORE CALLING (BOTH STEPS REQUIRED):
+        1. Check if ASSIGNEE mentioned in user query
         - If NO assignee → Ask user for assignee, DO NOT call this function
-        3. Check if SPRINT mentioned in user query
+        2. Check if SPRINT mentioned in user query
         - If NO sprint → Ask user for sprint choice, DO NOT call this function
-        4. If ALL THREE present → Call this function immediately
+        3. If BOTH present → Call this function immediately
 
         Examples requiring information gathering first:
-        - "create ticket" → ASK FOR PROJECT
-        - "create ticket in LUNA_TICKETS" → ASK FOR ASSIGNEE
-        - "create ticket in LUNA_TICKETS assign to john" → ASK FOR SPRINT
-        - "create ticket assign to john" → ASK FOR PROJECT, then SPRINT
+        - "create ticket" → ASK FOR ASSIGNEE
+        - "create ticket assign to john" → ASK FOR SPRINT
+        - "create ticket in backlog" → ASK FOR ASSIGNEE
 
-        Examples ready to create immediately:
-        - "create ticket in SCRUM assign to john sprint Sprint 24" → CALL FUNCTION
-        - "create ticket assign to sarah@company.com backlog in DevOps" → CALL FUNCTION
-        - "make task assign to me LT Sprint 1 in LUNA_TICKETS" → CALL FUNCTION
-        - "create ticket in AI assign to unassigned backlog" → CALL FUNCTION
+        Examples ready to create immediately (with default "AI" project):
+        - "create ticket assign to john sprint Sprint 24" → CALL FUNCTION (project="AI")
+        - "create ticket assign to sarah@company.com backlog" → CALL FUNCTION (project="AI")
+        - "make task assign to me LT Sprint 1" → CALL FUNCTION (project="AI")
+
+        Examples with specified project:
+        - "create ticket in SCRUM assign to john sprint Sprint 24" → CALL FUNCTION (project="SCRUM")
+        - "create ticket assign to sarah@company.com backlog in DevOps" → CALL FUNCTION (project="DevOps")
 
         SPRINT PARAMETER USAGE:
         - sprint_name="Sprint 24" → Adds ticket to Sprint 24
         - sprint_name="LT Sprint 1" → Adds ticket to LT Sprint 1
         - sprint_name=None → Adds ticket to backlog (ONLY if user explicitly said "backlog")
 
-        NEVER call this function without confirming project, assignee, AND sprint!
+        NEVER call this function without confirming assignee AND sprint!
         Always return issue key in response.
         """
         if issue_type_name is None:
@@ -190,11 +189,10 @@ class JiraService:
 
         # Use default project if not provided or empty
         if not project_name_or_key or project_name_or_key.strip() == "":
-            return {
-                "success": False,
-                "error": "Project required",
-                "message": "Please specify which project to create this ticket in (e.g., SCRUM, DevOps, AI)",
-            }
+            project_name_or_key = self.default_project
+            logger.info(
+                f"No project specified, using default project: {self.default_project}"
+            )
 
         try:
             project_key = self.utils.resolve_project_key(project_name_or_key)
@@ -346,6 +344,7 @@ class JiraService:
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
                 "sprint": sprint_status,  # NEW: Include sprint info
+                "project": project_key,  # Include which project was used
             }
 
             # Add assignment information if there were issues
@@ -357,7 +356,7 @@ class JiraService:
                 )
 
             logger.info(
-                f"Issue {issue_key} created with status: {result.get('status')} in sprint: {sprint_status}"
+                f"Issue {issue_key} created in project {project_key} with status: {result.get('status')} in sprint: {sprint_status}"
             )
             return result
 
@@ -381,6 +380,7 @@ class JiraService:
         issue_type_name: str = None,
         labels: str = None,  # Comma-separated string
         sprint_name: str = None,  # Sprint movement support with ongoing detection
+        status_name: str = None,  # NEW: Status update parameter
     ) -> dict:
         """
         Update an existing Jira ticket/issue. Use this tool when the user wants to:
@@ -391,15 +391,10 @@ class JiraService:
         - Add or modify labels and tags
         - Change the ticket type or other properties
         - Move ticket to different sprint or backlog
+        - Update ticket status (To Do, In Progress, Done, etc.)
 
         IMPORTANT: This tool requires a valid issue key. If the user mentions updating
         a ticket but doesn't provide the key, ask them which specific ticket to update.
-
-        SPRINT MOVEMENT: When user wants to move to "ongoing" or "current" sprint:
-        1. Extract project from issue key
-        2. Use get_sprint_list_sync(project) to get available sprints
-        3. Find the sprint marked (ONGOING) and use that specific name
-        4. Call this function with the actual sprint name
 
         Args:
             issue_key: The ticket ID (REQUIRED) - format like "SCRUM-123", "AI-456", "LUNA-789"
@@ -412,27 +407,10 @@ class JiraService:
             issue_type_name: "Task", "Bug", "Story", "Epic" to change ticket type (optional)
             labels: Comma-separated labels like "urgent,frontend,api" (optional)
             sprint_name: Specific sprint name or "backlog" to move ticket (optional)
+            status_name: Status to transition to like "In Progress", "Done", "To Do" (optional)
 
         Returns:
             dict: Updated ticket information including success status and current field values
-
-        Examples of when to use this tool:
-            - User says: "Move LT-23 to Sprint 24" → Use sprint_name="Sprint 24"
-            - User says: "Move SCRUM-456 to backlog" → Use sprint_name="backlog"
-            - User says: "Move LT-23 to ongoing sprint" → Get sprint list first, then use actual ongoing sprint name
-            - User says: "Assign SCRUM-456 to john@company.com" → Use assignee_email
-            - User says: "Change priority of AI-789 to High" → Use priority_name="High"
-
-        WORKFLOW FOR "ONGOING SPRINT" REQUESTS:
-        1. User says "move LT-23 to ongoing sprint"
-        2. Extract project from LT-23 → LUNA_TICKETS
-        3. Call get_sprint_list_sync("LUNA_TICKETS")
-        4. Find sprint marked (ONGOING) → e.g., "LT Sprint 3"
-        5. Call update_issue_sync(issue_key="LT-23", sprint_name="LT Sprint 3")
-
-        Do NOT use this tool if:
-            - User doesn't provide a specific issue key
-            - User wants to create a new ticket (use create_issue_sync instead)
         """
         try:
             # Convert labels string to list if provided
@@ -457,6 +435,7 @@ class JiraService:
                 issue_type_name=issue_type_name,
                 labels=labels_list,
                 sprint_name=sprint_name,  # Pass sprint name for movement
+                status_name=status_name,  # NEW: Pass status name for updates
             )
 
             return result

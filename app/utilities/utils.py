@@ -449,6 +449,130 @@ class Utils:
         if not r.ok:
             raise RuntimeError(f"Update description failed {r.status_code}: {r.text}")
 
+    def get_current_description_text(self, issue_key: str) -> str:
+        """Get the current description as plain text from a Jira issue."""
+        try:
+            issue = self.get_issue(issue_key, "description")
+            description_adf = issue["fields"].get("description")
+
+            if not description_adf:
+                return ""
+
+            # Convert ADF back to plain text
+            return self.adf_to_text(description_adf)
+        except Exception as e:
+            logger.error(f"Error getting current description for {issue_key}: {e}")
+            return ""
+
+    def adf_to_text(self, adf_content: dict) -> str:
+        """Convert Atlassian Document Format to plain text."""
+        if not adf_content or not isinstance(adf_content, dict):
+            return ""
+
+        def extract_text_from_node(node):
+            text_parts = []
+
+            if isinstance(node, dict):
+                # Handle text nodes
+                if node.get("type") == "text":
+                    text_parts.append(node.get("text", ""))
+
+                # Handle paragraph breaks
+                elif node.get("type") == "paragraph":
+                    if "content" in node:
+                        for child in node["content"]:
+                            text_parts.append(extract_text_from_node(child))
+                    text_parts.append("\n")
+
+                # Handle hard breaks
+                elif node.get("type") == "hardBreak":
+                    text_parts.append("\n")
+
+                # Recursively handle content arrays
+                elif "content" in node:
+                    for child in node["content"]:
+                        text_parts.append(extract_text_from_node(child))
+
+            return "".join(text_parts)
+
+        return extract_text_from_node(adf_content).strip()
+
+    def smart_update_description(
+        self, issue_key: str, update_instruction: str, llm_model
+    ) -> dict:
+        """
+        Intelligently update description based on user instruction using LLM.
+
+        Args:
+            issue_key: The Jira issue key
+            update_instruction: What the user wants to change
+            llm_model: The LLM model instance to use for analysis
+
+        Returns:
+            dict: Result with success status and updated description
+        """
+        try:
+            # Get current description
+            current_description = self.get_current_description_text(issue_key)
+
+            # If no current description, treat as new description
+            if not current_description.strip():
+                logger.info(
+                    f"No existing description for {issue_key}, creating new one"
+                )
+                return {
+                    "success": True,
+                    "new_description": update_instruction,
+                    "action": "created_new",
+                }
+
+            # Use LLM to intelligently update the description
+            system_prompt = """You are a Jira description editor. Your job is to intelligently update existing descriptions based on user instructions.
+
+    RULES:
+    1. Preserve all existing content unless specifically asked to change it
+    2. Only modify the parts the user specifically mentions
+    3. Maintain the original structure and formatting where possible
+    4. If adding new information, integrate it naturally
+    5. If replacing information, only replace what's specifically mentioned
+
+    Return ONLY the updated description text, nothing else."""
+
+            user_prompt = f"""Current Description:
+    {current_description}
+
+    User Instruction:
+    {update_instruction}
+
+    Please update the description according to the instruction while preserving all other content."""
+
+            # Call the LLM
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            response = llm_model.invoke(messages)
+            updated_description = response.content.strip()
+
+            logger.info(f"Description updated for {issue_key} using LLM")
+
+            return {
+                "success": True,
+                "new_description": updated_description,
+                "action": "updated_existing",
+                "original_description": current_description,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in smart_update_description for {issue_key}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "new_description": update_instruction,  # Fallback to replacement
+                "action": "fallback_replacement",
+            }
+
     def get_issue(
         self,
         issue_key: str,
@@ -473,41 +597,42 @@ class Utils:
             if not board_id:
                 logger.warning(f"No board found for project {project_key}")
                 return
-            
+
             # Get all sprints that might contain this issue
             start_at = 0
             while True:
                 r = self.session.get(
                     f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
-                    params={"startAt": start_at, "maxResults": 50, "state": "active,future"},
-                    timeout=30
+                    params={
+                        "startAt": start_at,
+                        "maxResults": 50,
+                        "state": "active,future",
+                    },
+                    timeout=30,
                 )
                 r.raise_for_status()
                 data = r.json()
-                
+
                 for sprint in data.get("values", []):
                     try:
                         # Try to remove issue from this sprint (will silently fail if not in sprint)
                         remove_url = f"{self.base_url}/rest/agile/1.0/sprint/{sprint['id']}/issue"
                         self.session.post(
-                            remove_url,
-                            json={"issues": [issue_key]},
-                            timeout=20
+                            remove_url, json={"issues": [issue_key]}, timeout=20
                         )
                     except Exception:
                         # Ignore errors - issue might not be in this sprint
                         pass
-                
+
                 if data.get("isLast") or not data.get("values"):
                     break
                 start_at += len(data.get("values", []))
-            
+
             logger.info(f"Removed {issue_key} from all active/future sprints")
-            
+
         except Exception as e:
             logger.warning(f"Error removing {issue_key} from sprints: {e}")
             # Non-fatal error - continue with the operation
-
 
     def update_issue(
         self,
@@ -647,36 +772,174 @@ class Utils:
                         f"Jira update failed {resp.status_code}: {resp.text}"
                     )
 
-            # NEW: HANDLE SPRINT MOVEMENT
+            # ENHANCED SPRINT HANDLING - Actually moves tickets
             sprint_status = None
             sprint_updated = False
-            
+
             if sprint_name is not None:
                 try:
-                    if sprint_name.lower().strip() == "backlog":
-                        # Move to backlog (remove from all sprints)
-                        self._remove_issue_from_all_sprints(issue_key, project_key)
-                        sprint_status = "Backlog"
-                        sprint_updated = True
-                        logger.info(f"Moved {issue_key} to backlog")
+                    sprint_name_clean = sprint_name.lower().strip()
+
+                    if sprint_name_clean in [
+                        "backlog",
+                        "main backlog",
+                        "project backlog",
+                    ]:
+                        # Move to backlog - need to actually clear the sprint field
+                        logger.info(f"Moving {issue_key} to backlog")
+
+                        # Method 1: Try to find and clear the sprint custom field
+                        try:
+                            # Get the current issue to find sprint field
+                            current_issue_full = self.get_issue(issue_key, "*all")
+                            sprint_field_id = None
+
+                            # Find the sprint custom field
+                            for field_id, field_value in current_issue_full[
+                                "fields"
+                            ].items():
+                                if (
+                                    field_id.startswith("customfield_")
+                                    and field_value is not None
+                                ):
+                                    if (
+                                        isinstance(field_value, list)
+                                        and len(field_value) > 0
+                                    ):
+                                        # Check if this looks like a sprint field
+                                        sprint_item = (
+                                            field_value[0] if field_value else None
+                                        )
+                                        if sprint_item and isinstance(
+                                            sprint_item, (str, dict)
+                                        ):
+                                            if (
+                                                "Sprint" in str(sprint_item)
+                                                or "sprint" in str(sprint_item).lower()
+                                            ):
+                                                sprint_field_id = field_id
+                                                logger.info(
+                                                    f"Found sprint field: {field_id}"
+                                                )
+                                                break
+
+                            if sprint_field_id:
+                                # Clear the sprint field to move to backlog
+                                update_url = (
+                                    f"{self.base_url}/rest/api/3/issue/{issue_key}"
+                                )
+                                clear_sprint_payload = {
+                                    "fields": {sprint_field_id: None}
+                                }
+
+                                response = self.session.put(
+                                    update_url, json=clear_sprint_payload, timeout=30
+                                )
+
+                                if response.ok:
+                                    sprint_status = "Backlog"
+                                    sprint_updated = True
+                                    logger.info(
+                                        f"Successfully moved {issue_key} to backlog by clearing sprint field {sprint_field_id}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Failed to clear sprint field: {response.status_code} - {response.text}"
+                                    )
+                                    raise Exception("Sprint field clear failed")
+                            else:
+                                logger.info(
+                                    f"No sprint field found for {issue_key}, trying common field IDs"
+                                )
+                                raise Exception("No sprint field found")
+
+                        except Exception as sprint_clear_error:
+                            logger.warning(
+                                f"Sprint field detection failed: {sprint_clear_error}"
+                            )
+
+                            # Method 2: Try common sprint field IDs
+                            common_sprint_fields = [
+                                "customfield_10020",  # Most common
+                                "customfield_10014",
+                                "customfield_10010",
+                                "customfield_10021",
+                                "customfield_10016",
+                            ]
+
+                            backlog_moved = False
+                            for field_id in common_sprint_fields:
+                                try:
+                                    update_url = (
+                                        f"{self.base_url}/rest/api/3/issue/{issue_key}"
+                                    )
+                                    clear_payload = {"fields": {field_id: None}}
+
+                                    response = self.session.put(
+                                        update_url, json=clear_payload, timeout=30
+                                    )
+
+                                    if response.ok:
+                                        sprint_status = "Backlog"
+                                        sprint_updated = True
+                                        backlog_moved = True
+                                        logger.info(
+                                            f"Successfully moved {issue_key} to backlog using field {field_id}"
+                                        )
+                                        break
+                                    else:
+                                        logger.debug(
+                                            f"Field {field_id} clear failed: {response.status_code}"
+                                        )
+                                        continue
+
+                                except Exception as field_error:
+                                    logger.debug(
+                                        f"Error trying field {field_id}: {field_error}"
+                                    )
+                                    continue
+
+                            if not backlog_moved:
+                                logger.warning(
+                                    f"Could not move {issue_key} to backlog - no working sprint field found"
+                                )
+                                sprint_status = (
+                                    "Backlog move failed - sprint field not found"
+                                )
+
                     else:
-                        # Move to specific sprint
+                        # Move to specific sprint - use exact same logic as create
+                        logger.info(
+                            f"Moving {issue_key} to sprint: {sprint_name.strip()}"
+                        )
+
                         board_id = self._get_board_id_for_project(project_key)
                         if not board_id:
-                            raise RuntimeError(f"No board found for project {project_key}")
-                        sprint_id = self._get_sprint_id_by_name(board_id, sprint_name.strip())
+                            raise RuntimeError(
+                                f"No board found for project {project_key}"
+                            )
+
+                        sprint_id = self._get_sprint_id_by_name(
+                            board_id, sprint_name.strip()
+                        )
                         if not sprint_id:
-                            raise RuntimeError(f"{sprint_name.strip()} not found on this board")
-                        
-                        # Remove from current sprints and add to new one
-                        self._remove_issue_from_all_sprints(issue_key, project_key)
+                            raise RuntimeError(
+                                f"{sprint_name.strip()} not found on this board"
+                            )
+
+                        # Use the same method as create_issue_sync - this should work
                         self._add_issue_to_sprint(sprint_id, issue_key)
                         sprint_status = sprint_name.strip()
                         sprint_updated = True
-                        logger.info(f"Moved {issue_key} to sprint {sprint_name.strip()}")
-                        
+                        logger.info(
+                            f"Issue {issue_key} moved to sprint {sprint_name.strip()} (id={sprint_id})"
+                        )
+
                 except Exception as e:
-                    logger.warning(f"Failed to move {issue_key} to sprint {sprint_name}: {e}")
+                    # Non-fatal error handling like in create
+                    logger.warning(
+                        f"Failed to move {issue_key} to sprint {sprint_name}: {e}"
+                    )
                     sprint_status = f"Sprint move failed: {str(e)}"
 
             # Get updated issue details
@@ -830,7 +1093,6 @@ class Utils:
             start_at += len(data.get("values", []))
         return None
 
-
     def get_all_sprints_for_project(self, project_key: str) -> str:
         """
         Get all sprints for a project ordered by latest on top with status.
@@ -840,51 +1102,57 @@ class Utils:
             board_id = self._get_board_id_for_project(project_key)
             if not board_id:
                 return f"No board found for project {project_key}. Use 'backlog' for no sprint."
-            
+
             # Get all sprints (active, future, closed)
             all_sprints = []
             start_at = 0
-            
+
             while True:
                 r = self.session.get(
                     f"{self.base_url}/rest/agile/1.0/board/{board_id}/sprint",
-                    params={"startAt": start_at, "maxResults": 50, "state": "active,future,closed"},
-                    timeout=30
+                    params={
+                        "startAt": start_at,
+                        "maxResults": 50,
+                        "state": "active,future,closed",
+                    },
+                    timeout=30,
                 )
                 r.raise_for_status()
                 data = r.json()
-                
+
                 for sprint in data.get("values", []):
-                    all_sprints.append({
-                        "id": sprint["id"],
-                        "name": sprint["name"],
-                        "state": sprint["state"],
-                        "startDate": sprint.get("startDate"),
-                        "endDate": sprint.get("endDate")
-                    })
-                
+                    all_sprints.append(
+                        {
+                            "id": sprint["id"],
+                            "name": sprint["name"],
+                            "state": sprint["state"],
+                            "startDate": sprint.get("startDate"),
+                            "endDate": sprint.get("endDate"),
+                        }
+                    )
+
                 if data.get("isLast") or not data.get("values"):
                     break
                 start_at += len(data.get("values", []))
-            
+
             # Sort by ID descending (latest first)
             all_sprints.sort(key=lambda x: x["id"], reverse=True)
-            
+
             # Format for AI
             sprint_options = [f"Available sprints for {project_key}:"]
             sprint_options.append("- backlog (no specific sprint)")
-            
+
             for sprint in all_sprints[:10]:  # Limit to 10 latest sprints
                 status_marker = ""
                 if sprint["state"] == "active":
                     status_marker = " (ONGOING)"
                 elif sprint["state"] == "future":
                     status_marker = " (upcoming)"
-                
+
                 sprint_options.append(f"- {sprint['name']}{status_marker}")
-            
+
             return "\n".join(sprint_options)
-            
+
         except Exception as e:
             logger.error(f"Error getting sprints for {project_key}: {e}")
             return f"Could not retrieve sprints for {project_key}. Use 'backlog' for no sprint."
