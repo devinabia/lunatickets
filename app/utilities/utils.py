@@ -1357,7 +1357,7 @@ class Utils:
     ) -> None:
         """Save Slack tracking data to JSON file in root directory."""
         try:
-            file_path = "slack_tracking.json"
+            file_path = "slack_message.json"
 
             # Create new record
             new_record = {
