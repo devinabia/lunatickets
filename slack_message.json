@@ -1,0 +1,24 @@
+[
+  {
+    "message_id": "9499761767174.3403053004069.e0d8c069dc3c339069121b8afc27eccd",
+    "channel_id": "C09EK49N2V9",
+    "channel_name": "react-agent-test",
+    "issue_key": "AI-3231",
+    "timestamp": "2025-09-11T13:28:25.621876"
+  },
+  {
+    "message_id": "9526673248112.3403053004069.268509bcd07191bf4138ea3c898dd53d",
+    "channel_id": "C09EK49N2V9",
+    "channel_name": "react-agent-test",
+    "issue_key": "AI-3232",
+    "timestamp": "2025-09-11T13:30:25.228678"
+  },
+  {
+  "message_id": "1757497811.329199",
+  "channel_id": "C09EG87L9NJ",
+  "channel_name": "adnan-test-channel",
+  "issue_key": "BUN-6",
+  "timestamp": "2025-09-11T13:30:25.228678"
+
+}
+]

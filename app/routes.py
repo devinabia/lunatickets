@@ -10,6 +10,11 @@ import asyncio
 import re
 import os
 from dotenv import load_dotenv
+from datetime import datetime
+from fastapi.responses import PlainTextResponse
+from fastapi import Request
+
+from .utilities.utils import Utils
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -21,16 +26,17 @@ slack_app = App(
 )
 
 
-def call_jira_api(query, channel_id=None):
-    print(channel_id, ".......")
-    """Helper function to call Jira API with optional channel ID"""
+def call_jira_api(query, channel_id=None, message_id=None):
+    """Helper function to call Jira API with optional channel and message ID"""
     try:
         api_endpoint = f"{os.getenv('APP_BACKEND_URL')}ask-query"
 
-        # Prepare payload with channel_id if provided
+        # Prepare payload with channel_id and message_id if provided
         payload = {"query": query}
         if channel_id:
             payload["channel_id"] = channel_id
+        if message_id:
+            payload["message_id"] = message_id
 
         response = requests.post(
             api_endpoint,
@@ -59,7 +65,8 @@ def handle_app_mention(event, say):
     try:
         logger.info(f"App mention received: {event}")
         text = event.get("text", "")
-        channel_id = event.get("channel")  # Extract channel ID
+        channel_id = event.get("channel")
+        message_id = event.get("ts")  # Slack timestamp as message ID
         user_query = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
         # Log channel information
@@ -72,7 +79,8 @@ def handle_app_mention(event, say):
             return
 
         # Pass channel_id to the API call
-        answer = call_jira_api(user_query, channel_id)
+        answer = call_jira_api(user_query, channel_id, message_id)
+
         say(
             {
                 "text": f"{answer}",
@@ -283,7 +291,18 @@ class BotRouter:
                     text = form_data.get("text", "").strip()
                     user_name = form_data.get("user_name", "Unknown")
                     response_url = form_data.get("response_url", "")
-                    channel_id = form_data.get("channel_id", "")  # Extract channel ID
+                    channel_id = form_data.get("channel_id", "")
+                    # Extract additional Slack data
+                    user_id = form_data.get("user_id", "")
+                    trigger_id = form_data.get(
+                        "trigger_id", ""
+                    )  # Can be used as message_id alternative
+
+                    # For slash commands, we can use trigger_id as message identifier
+                    message_id = (
+                        trigger_id
+                        or f"slash_{user_id}_{int(datetime.now().timestamp())}"
+                    )
 
                     logger.info(
                         f"Slack - Command: {command}, Text: {text}, User: {user_name}, Channel: {channel_id}"
@@ -315,6 +334,7 @@ class BotRouter:
                         user_name,
                         response_url,
                         channel_id,
+                        message_id,  # Pass message_id
                     )
 
                     logger.info("Returning immediate acknowledgment to Slack")
@@ -342,7 +362,12 @@ class BotRouter:
             raise HTTPException(status_code=500, detail="Internal server error")
 
     async def process_slack_query_async(
-        self, query: str, user_name: str, response_url: str, channel_id: str = None
+        self,
+        query: str,
+        user_name: str,
+        response_url: str,
+        channel_id: str = None,
+        message_id: str = None,
     ):
         """
         Background task to process the actual query and send response to Slack
@@ -356,13 +381,15 @@ class BotRouter:
 
             user_query = UserQuery(query=query)
             # Pass channel_id to the service
-            result = await self.jira_service.process_query(user_query, channel_id)
+            result = await self.jira_service.process_query(
+                user_query, channel_id, message_id
+            )
             logger.info(f"Query processed successfully, sending response to Slack")
 
             final_response = {
                 "response_type": "in_channel",
                 "replace_original": True,
-                "text": f"Jira Ticket\n\n{result.get('data', '')}",
+                "text": f"{result.get('data', '')}",
             }
 
             response = requests.post(
@@ -422,6 +449,59 @@ def create_app():
 
     # Include router with prefix (keeping your original structure without prefix)
     app.include_router(bot_router.router, tags=["Bot"])
+
+    @app.post("/jira-webhook", tags=["Slack"])
+    async def jira_webhook(request: Request):
+        LAST_STATUS = {}
+        RECENT = {}
+
+        payload = await request.json()
+        issue = payload.get("issue", {})
+        fields = issue.get("fields", {})
+        issue_key = issue.get("key", "UNKNOWN")
+        ts = int(payload.get("timestamp") or 0)
+
+        # Deduplication
+        last_ts = RECENT.get(issue_key, 0)
+        if ts and last_ts and ts <= last_ts:
+            return PlainTextResponse("", status_code=200)
+        RECENT[issue_key] = ts
+
+        # Find status change
+        items = payload.get("changelog", {}).get("items", [])
+        status_item = next((i for i in items if i.get("field") == "status"), None)
+        if not status_item:
+            return PlainTextResponse("", status_code=200)
+
+        from_status = (status_item.get("fromString") or "").strip()
+        to_status = (status_item.get("toString") or "").strip()
+        if not from_status or not to_status or from_status == to_status:
+            return PlainTextResponse("", status_code=200)
+
+        # Ignore automation actors
+        actor = payload.get("user", {})
+        actor_name = actor.get("displayName", "")
+        if "automation" in actor_name.lower():
+            return PlainTextResponse("", status_code=200)
+
+        # Current status
+        status_obj = fields.get("status", {})
+        current_status = (status_obj.get("name") or "").strip().lower()
+        current_cat = (status_obj.get("statusCategory", {}).get("key") or "").lower()
+        is_now_done = (current_status == "done") or (current_cat == "done")
+
+        # Dedup status transitions
+        last_status = LAST_STATUS.get(issue_key)
+        if to_status.lower() == last_status:
+            print(f"[SKIP] {issue_key}: Status did not change (still {to_status})")
+            return PlainTextResponse("", status_code=200)
+
+        print(f"Status changed: {from_status} → {to_status}")
+        print("issue_key:", issue_key, "\n\n")
+        Utils.postStatusMsgToSlack(issue_key, to_status)
+
+        LAST_STATUS[issue_key] = to_status.lower()
+        return PlainTextResponse("", status_code=200)
 
     # Add Slack routes
     @app.post("/slack/events", tags=["Slack"])
