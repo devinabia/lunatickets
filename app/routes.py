@@ -66,11 +66,11 @@ def handle_app_mention(event, say):
         logger.info(f"App mention received: {event}")
         text = event.get("text", "")
         channel_id = event.get("channel")
-        message_id = event.get("ts")  # Slack timestamp as message ID
+        message_id = event.get("ts")  # User's message timestamp
         user_query = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
         # Log channel information
-        logger.info(f"Message from channel: {channel_id}")
+        logger.info(f"Message from channel: {channel_id}, message_id: {message_id}")
 
         if not user_query:
             say(
@@ -78,7 +78,7 @@ def handle_app_mention(event, say):
             )
             return
 
-        # Pass channel_id to the API call
+        # Pass channel_id and message_id to the API call
         answer = call_jira_api(user_query, channel_id, message_id)
 
         say(
@@ -104,9 +104,12 @@ def handle_dm_message(message, say):
         logger.info(f"DM received: {message}")
         user_query = message["text"].strip()
         channel_id = message.get("channel")  # Extract channel ID (DM channel)
+        message_id = message.get("ts")  # User's message timestamp
 
         # Log channel information
-        logger.info(f"Direct message from channel: {channel_id}")
+        logger.info(
+            f"Direct message from channel: {channel_id}, message_id: {message_id}"
+        )
 
         if not user_query:
             say(
@@ -117,8 +120,8 @@ def handle_dm_message(message, say):
         if user_query.lower().startswith("ask"):
             return
 
-        # Pass channel_id to the API call
-        answer = call_jira_api(user_query, channel_id)
+        # Pass channel_id and message_id to the API call
+        answer = call_jira_api(user_query, channel_id, message_id)
         say(f"{answer}")
 
     except Exception as e:
@@ -133,12 +136,15 @@ def handle_create_message(message, say):
         logger.info(f"Create message received: {message}")
         user_query = message["text"]
         channel_id = message.get("channel")  # Extract channel ID
+        message_id = message.get("ts")  # User's message timestamp
 
         # Log channel information
-        logger.info(f"Create message from channel: {channel_id}")
+        logger.info(
+            f"Create message from channel: {channel_id}, message_id: {message_id}"
+        )
 
-        # Pass channel_id to the API call
-        answer = call_jira_api(user_query, channel_id)
+        # Pass channel_id and message_id to the API call
+        answer = call_jira_api(user_query, channel_id, message_id)
         say(
             {
                 "text": f"{answer}",
@@ -161,9 +167,12 @@ def handle_jira_slash_command(ack, respond, command):
         logger.info(f"Jira slash command received: {command}")
         query = command["text"].strip()
         channel_id = command.get("channel_id")  # Extract channel ID
+        message_id = command.get("trigger_id")  # User's command trigger ID
 
         # Log channel information
-        logger.info(f"Slash command from channel: {channel_id}")
+        logger.info(
+            f"Slash command from channel: {channel_id}, message_id: {message_id}"
+        )
 
         if not query:
             respond(
@@ -174,8 +183,8 @@ def handle_jira_slash_command(ack, respond, command):
             )
             return
 
-        # Pass channel_id to the API call
-        answer = call_jira_api(query, channel_id)
+        # Pass channel_id and message_id to the API call
+        answer = call_jira_api(query, channel_id, message_id)
         respond(
             {
                 "response_type": "in_channel",
@@ -264,16 +273,20 @@ class BotRouter:
                             status_code=422, detail="Missing 'query' field"
                         )
 
-                    # Extract channel_id if provided in JSON payload
+                    # Extract channel_id and message_id if provided in JSON payload
                     channel_id = body.get("channel_id")
+                    message_id = body.get("message_id")  # Add message_id extraction
+
                     if channel_id:
-                        logger.info(f"API request from channel: {channel_id}")
+                        logger.info(
+                            f"API request from channel: {channel_id}, message_id: {message_id}"
+                        )
 
                     user_query = UserQuery(query=body["query"])
 
-                    # Pass channel_id to the service
+                    # Pass both channel_id and message_id to the service
                     result = await self.jira_service.process_query(
-                        user_query, channel_id
+                        user_query, channel_id, message_id
                     )
 
                     return result
@@ -298,14 +311,11 @@ class BotRouter:
                         "trigger_id", ""
                     )  # Can be used as message_id alternative
 
-                    # For slash commands, we can use trigger_id as message identifier
-                    message_id = (
-                        trigger_id
-                        or f"slash_{user_id}_{int(datetime.now().timestamp())}"
-                    )
+                    # For slash commands, create a simpler message ID format since trigger_id is too complex
+                    message_id = f"slash_{user_id}_{int(datetime.now().timestamp())}"
 
                     logger.info(
-                        f"Slack - Command: {command}, Text: {text}, User: {user_name}, Channel: {channel_id}"
+                        f"Slack - Command: {command}, Text: {text}, User: {user_name}, Channel: {channel_id}, Message: {message_id}"
                     )
                     logger.info(f"Response URL: {response_url}")
 
@@ -374,13 +384,13 @@ class BotRouter:
         """
         try:
             logger.info(
-                f"Starting background processing for query: {query} from channel: {channel_id}"
+                f"Starting background processing for query: {query} from channel: {channel_id}, message: {message_id}"
             )
 
             await asyncio.sleep(1)
 
             user_query = UserQuery(query=query)
-            # Pass channel_id to the service
+            # Pass both channel_id and message_id to the service
             result = await self.jira_service.process_query(
                 user_query, channel_id, message_id
             )
