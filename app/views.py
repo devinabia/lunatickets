@@ -414,7 +414,7 @@ Return only the grammatically corrected request:"""
         try:
             logger.info(f"=== DEBUG START ===")
             logger.info(f"Processing query: {user_query.query}")
-            logger.info(f"Message ID (AI response): {message_id}")
+            print(f"Message ID (AI response): {message_id}")
 
             # Just get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
