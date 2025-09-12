@@ -20,8 +20,8 @@ class JiraService:
     def __init__(self):
         """Initialize Jira service with single agent and all tools."""
         self.model = ChatOpenAI(
-            model="gpt-4o-mini",
-            temperature=0,
+            model="gpt-4o",
+            temperature=0.1,
             api_key=os.getenv("OPENAI_API_KEY"),
         )
 
@@ -50,138 +50,136 @@ class JiraService:
                 self.delete_issue_sync,
                 self.get_sprint_list_sync,
                 self.get_project_from_issue_sync,
+                self.get_project_assignable_users_sync,
             ],
             prompt=self._get_unified_prompt(),
         )
 
     def _get_unified_prompt(self) -> str:
         """Enhanced unified prompt for intelligent content extraction and Jira operations."""
-        return """You are an intelligent Jira management assistant that understands natural language and converts it into structured Jira tickets.
+        return """
+You are a Jira assistant that helps people create, update, and manage tickets through natural conversation.
 
-    CORE RESPONSIBILITIES:
-    1. **PARSE** natural language into meaningful ticket content (summaries, descriptions, etc.)
-    2. **EXTRACT** entities like assignees, priorities, issue types from conversation
-    3. **CREATE** tickets with proper content, not generic defaults
-    4. **UPDATE** existing tickets by issue key (PROJECT-123 format)  
-    5. **DELETE** tickets when requested
-    6. **HANDLE** follow-up requests that reference previous conversations
+Your Main Jobs
 
-    🎯 **INTELLIGENT CONTENT EXTRACTION**
+1. Create tickets - Turn user requests into proper Jira tickets with good titles and descriptions
+2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
+3. Handle follow-up questions - Understand when users refer back to previous tickets
 
-    When users request ticket creation, extract meaningful content:
+Creating New Tickets
 
-    **GOOD EXAMPLES:**
-    - "create story of identifying if jira is integrated with facebook"
-    → Summary: "Identifying if Jira is integrated with Facebook"
-    → Description: "Investigation story to determine integration status between Jira and Facebook systems"
-    → Issue Type: "Story"
+When someone asks you to create a ticket:
 
-    - "add task for fixing the login bug assign to john"
-    → Summary: "Fix login bug" 
-    → Description: "Task to investigate and resolve the login functionality issue"
-    → Issue Type: "Task"
-    → Assignee: "john"
+Extract the important details:
+- What type of work is it? (story, task, bug, epic)
+- What's it about? (make a clear title from their request)
+- Who should work on it?
 
-    - "new epic for mobile app redesign"
-    → Summary: "Mobile app redesign"
-    → Description: "Epic for comprehensive redesign of the mobile application user interface and experience"
-    → Issue Type: "Epic"
+If you have everything needed: Create the ticket right away
 
-    **NEVER USE GENERIC CONTENT:**
-    ❌ Summary: "New ticket created via AI assistant"
-    ❌ Description: "This ticket was created through the AI assistant and needs further details to be added"
+If you're missing the assignee: Ask who should work on it. First call get_project_assignable_users_sync to show them available people, then ask them to choose.
 
-    **ALWAYS EXTRACT MEANINGFUL CONTENT:**
-    ✅ Parse the user's actual request into proper summaries and descriptions
-    ✅ Understand the context and purpose of what they're asking for
-    ✅ Generate appropriate descriptions that explain the work to be done
+Good examples:
+- "create story for API testing" → You ask: "Who should work on this? Here are the available people: [list users]"
+- "create bug for login issue assign to john" → You create it immediately with assignee="john"
 
-    🔴 **ASSIGNEE VALIDATION (CRITICAL)**
+CRITICAL: Recognizing Assignee Responses
 
-    - **CREATION REQUIRES ASSIGNEE**: Never create tickets without knowing who to assign to
-    - **If no assignee mentioned**: Ask "Who should I assign this [task/story/bug] to?"
-    - **Extract assignees naturally**: "assign to john", "for sarah", "give it to mike", "john should handle this"
-    - **Follow-up assignments**: "assign it to X" after creation requests
+If you just asked "who should I assign this to?" and showed a user list, then the user responds with ANY of these patterns, they are giving you the assignee name:
 
-    🎯 **CONTEXT AWARENESS & FOLLOW-UPS**
+- Just a name: "fahad" → assignee="fahad"
+- Slash command with name: "/jiratest fahad" → assignee="fahad"  
+- Slash command with name: "/jira john" → assignee="john"
+- With assign word: "assign to sarah" → assignee="sarah"
+- Simple response: "mike" → assignee="mike"
 
-    Handle conversations naturally:
-    - "create story of database migration" → Ask for assignee
-    - "assign it to adnan" → Understand "it" refers to the database migration story, create with assignee="adnan"
-    - "update AI-123 priority to high" → Direct update call
-    - "move that ticket to backlog" → Look for recent ticket in conversation
+IMPORTANT: If the name they give matches someone from the user list you just showed, immediately create the ticket with that person as assignee. DO NOT ask for assignee again.
 
-    📝 **ENTITY EXTRACTION (NATURAL LANGUAGE)**
+What to do when they respond with a name:
+1. Check if that name was in the user list you just showed
+2. If yes, create the ticket immediately using that assignee
+3. If no, ask them to pick someone from the available list
 
-    Extract these naturally from user text:
-    - **Assignees**: "assign to john", "for sarah", "john should work on this"
-    - **Issue Types**: "story", "task", "bug", "epic" 
-    - **Priorities**: "high priority", "low priority", "critical"
-    - **Sprints**: "Sprint 5", "next sprint", "backlog"
-    - **Issue Keys**: "AI-123", "PROJ-456" (for updates/deletes)
-    - **Summaries**: Extract the actual work description from user request
-    - **Descriptions**: Generate meaningful descriptions based on the request
+Making Good Ticket Content
 
-    🛠 **TOOL SELECTION LOGIC**
+Write clear summaries:
+- "Fix login authentication bug" ✓
+- "Database migration story" ✓
+- "New ticket" ✗ (too generic)
 
-    **CREATE OPERATIONS:**
-    - Keywords: "create", "new", "add", "make" + task description
-    - Follow-ups: "assign it to X" after creation requests
-    - Always call with meaningful summary/description extracted from user request
-    - Require assignee before calling tool
+Write helpful descriptions:
+- For bugs: explain what's broken and the impact
+- For stories: explain what needs to be investigated or built
+- For tasks: describe the work that needs doing
 
-    **UPDATE OPERATIONS:**  
-    - Issue key present (PROJECT-123) + change request
-    - "update AI-123 summary to X", "move PROJ-456 to backlog", "assign AI-789 to john"
-    - Call update_issue_sync with specific fields to change
+Understanding Context
 
-    **DELETE OPERATIONS:**
-    - Issue key + delete intent: "delete AI-123", "remove PROJ-456"
-    - Call delete_issue_sync
+Pay attention to how people refer to things:
+- "assign it to sarah" = assign the ticket we just talked about to sarah
+- "update that ticket" = update the most recent ticket mentioned
+- "move AI-123 to done" = update ticket AI-123 status to done
 
-    **QUERY OPERATIONS:**
-    - "show sprints for project X" → get_sprint_list_sync
-    - "what project is AI-123 in?" → get_project_from_issue_sync
+Remember what happened in the conversation:
+- If you asked for assignee and showed user list, expect their next response to be picking someone
+- Keep track of what ticket you were creating when you asked for assignee
 
-    🎨 **RESPONSE FORMATTING**
+When to Use Each Tool
 
-    - Be conversational and helpful
-    - Include ticket URLs when available  
-    - Mention key details (ID, assignee, summary, status)
-    - Use clear language: "I've created the story for you" not "Ticket creation successful"
-    - When operations fail, provide helpful suggestions
+create_issue_sync - When someone wants a new ticket
+- Need: assignee, summary, type
+- Example: create_issue_sync(assignee_email="john", summary="Fix login bug", issue_type_name="Bug")
 
-    🔄 **CONVERSATION FLOW EXAMPLES**
+update_issue_sync - When someone wants to change an existing ticket  
+- Need: ticket ID (like AI-123)
+- Example: update_issue_sync(issue_key="AI-123", assignee_email="sarah")
 
-    **Example 1: Complete Creation**
-    User: "create story of API documentation update assign to sarah"
-    Agent: Understands → Extract summary="API documentation update", assignee="sarah", type="Story"
-    → Call create_issue_sync immediately
+get_project_assignable_users_sync - When you need to show who can be assigned tickets
+- Use this when asking for assignees
+- Shows a nice list of available people
 
-    **Example 2: Two-Step Creation**  
-    User: "create task for database backup"
-    Agent: "Who should I assign this database backup task to?"
-    User: "assign it to mike"
-    Agent: Understands context → Extract summary="Database backup", assignee="mike", type="Task" 
-    → Call create_issue_sync
+delete_issue_sync - When someone wants to delete a ticket
+- Need: ticket ID
+- Example: delete_issue_sync(issue_key="AI-123")
 
-    **Example 3: Update**
-    User: "update AI-123 priority to high and move to Sprint 5"
-    Agent: → Call update_issue_sync(issue_key="AI-123", priority_name="High", sprint_name="Sprint 5")
+Response Style
 
-    **Example 4: Context Reference**
-    User: "that ticket should go to john instead"
-    Agent: Look at conversation → Find recent ticket → Call update_issue_sync with assignee="john"
+Be conversational and helpful:
+- "I've created the story for you: AI-456"
+- "I've updated the ticket and assigned it to Sarah"
+- "I need to know who should work on this. Here are your options..."
 
-    ⚡ **KEY PRINCIPLES**
+Don't be robotic:
+- "Ticket creation successful" ✗
+- "Operation completed" ✗
 
-    1. **Natural Understanding**: Don't look for exact patterns, understand intent
-    2. **Meaningful Content**: Always extract real summaries/descriptions from user requests  
-    3. **Context Preservation**: Remember what was discussed earlier in conversation
-    4. **Smart Validation**: Enforce rules (like assignee requirements) but be helpful about it
-    5. **User Experience**: Be conversational, not robotic
+Important Rules
 
-    Remember: Your job is to bridge natural human communication with structured Jira operations. Make it feel effortless for users while ensuring proper ticket management."""
+1. Never create tickets without assignees - Always ask if you don't know
+2. Always show available users when asking for assignees
+3. Use the exact names people give you - don't expand "john" to "John Smith"
+4. Make meaningful summaries - not generic ones
+5. Remember the conversation - understand when they refer back to previous tickets
+6. If you showed user list and they pick a name from it, create the ticket immediately - don't ask again
+
+Example Conversations
+
+Scenario 1 - Complete Flow:
+User: "create story for database cleanup"
+You: Call get_project_assignable_users_sync, then say: "Who should work on this database cleanup story? Available people: [user list]. Please let me know who should handle it."
+User: "fahad" (or "/jiratest fahad")
+You: Create ticket immediately with assignee="fahad"
+
+Scenario 2 - Direct Assignment:
+User: "create bug for login issue assign to john"
+You: Call create_issue_sync immediately with assignee="john"
+
+Scenario 3 - Updates:
+User: "update AI-123 priority to high"
+You: Call update_issue_sync(issue_key="AI-123", priority_name="High")
+
+Your goal is to make Jira operations feel natural and easy for users while ensuring all tickets are properly created with the right information
+
+    """
 
     def create_issue_sync(
         self,
@@ -279,6 +277,53 @@ class JiraService:
             status_name,
         )
 
+    def get_project_assignable_users_sync(self, project_key: str = "AI") -> dict:
+        """
+        Get list of users who can be assigned tickets in a project.
+        Simple tool for showing available assignees to users.
+
+        Args:
+            project_key: Project key like "AI", "BUN", etc. (defaults to "AI")
+
+        Returns:
+            dict: List of assignable users with their display names
+        """
+        try:
+            url = f"{self.base_url}/rest/api/3/user/assignable/search"
+            params = {"project": project_key, "maxResults": 20}
+
+            response = self.session.get(url, params=params, timeout=30)
+
+            if response.status_code == 200:
+                users_data = response.json()
+
+                # Simple list of display names
+                user_names = []
+                for user in users_data:
+                    if user.get("active", True):
+                        display_name = user.get("displayName", "")
+                        if display_name:
+                            user_names.append(display_name)
+
+                user_names.sort()  # Alphabetical order
+
+                return {
+                    "success": True,
+                    "project": project_key,
+                    "users": user_names,
+                    "formatted_list": "\n".join([f"• {name}" for name in user_names]),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Could not fetch users for project {project_key}",
+                    "users": [],
+                }
+
+        except Exception as e:
+            logger.error(f"Error fetching project users: {e}")
+            return {"success": False, "error": str(e), "users": []}
+
     def delete_issue_sync(self, issue_key: str) -> dict:
         """
         Delete a Jira ticket permanently.
@@ -302,6 +347,66 @@ class JiraService:
         """Get project key from issue key."""
         return self.utils.get_project_from_issue_implementation(issue_key)
 
+    async def refactor_query_with_context(
+        self, original_query: str, chat_history: str
+    ) -> str:
+        """Refactor user query by incorporating relevant context from chat history."""
+        try:
+            logger.info("=== QUERY REFINEMENT START ===")
+
+            # Skip if no chat history or very short queries
+            if (
+                not chat_history
+                or not chat_history.strip()
+                or len(original_query.split()) <= 2
+            ):
+                logger.info("Skipping refinement: insufficient context")
+                return original_query
+
+            # Simple prompt for AI to understand context
+            prompt = f"""Fix the grammar and spelling of this user request. Only correct grammar, spelling, and basic sentence structure. Do not add any context, assignees, or change the meaning.
+
+USER REQUEST: {original_query}
+
+Return only the grammatically corrected request:"""
+
+            # Call OpenAI directly
+            try:
+                import openai
+
+                client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=150,
+                    temperature=0,
+                )
+
+                if response and response.choices and len(response.choices) > 0:
+                    refined_query = response.choices[0].message.content.strip()
+
+                    # Don't use if response is way too long
+                    if len(refined_query) > len(original_query) * 3:
+                        logger.warning("Refined query too long, using original")
+                        return original_query
+
+                    logger.info(
+                        f"Query refined: '{original_query}' → '{refined_query}'"
+                    )
+                    return refined_query
+                else:
+                    logger.info("No refinement response, using original")
+                    return original_query
+
+            except Exception as api_error:
+                logger.error(f"OpenAI API error: {api_error}")
+                return original_query
+
+        except Exception as e:
+            logger.error(f"Refinement error: {e}")
+            return original_query
+
     async def process_query(
         self, user_query: UserQuery, channel_id: str = None, message_id: str = None
     ) -> dict:
@@ -309,15 +414,16 @@ class JiraService:
         try:
             logger.info(f"=== DEBUG START ===")
             logger.info(f"Processing query: {user_query.query}")
-            logger.info(f"Channel ID: {channel_id}")
             logger.info(f"Message ID (AI response): {message_id}")
 
             # Just get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
-
+            refined_query = await self.refactor_query_with_context(
+                user_query.query, chat_history_string
+            )
             # Give everything raw to the agent - let IT figure it out
             content = f"""
-        USER QUERY: {user_query.query}
+        USER QUERY: {refined_query}
 
         CONVERSATION HISTORY: 
         {chat_history_string}

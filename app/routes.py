@@ -158,65 +158,6 @@ def handle_create_message(message, say):
         say("Something went wrong. Please try again.")
 
 
-@slack_app.command("/jira")
-def handle_jira_slash_command(ack, respond, command):
-    """Handle /jira slash command - simpler approach"""
-    ack()
-
-    try:
-        logger.info(f"Jira slash command received: {command}")
-        query = command["text"].strip()
-        channel_id = command.get("channel_id")
-
-        if not query:
-            respond(
-                {
-                    "response_type": "ephemeral",
-                    "text": "Please provide a Jira request. Example: `/jira create a bug in AI project for database issues`",
-                }
-            )
-            return
-
-        # Post a processing message and get its timestamp immediately
-        processing_response = slack_app.client.chat_postMessage(
-            channel=channel_id, text=f"⏳ Processing: {query}..."
-        )
-
-        if processing_response["ok"]:
-            processing_ts = processing_response["ts"]
-            logger.info(f"Posted processing message with ts: {processing_ts}")
-
-            # Process the request
-            answer = call_jira_api(query, channel_id, processing_ts)
-
-            # Reply in thread to the processing message
-            slack_app.client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=processing_ts,  # This creates the thread reply!
-                text=f"✅ {answer}",
-                unfurl_links=True,
-                unfurl_media=True,
-            )
-
-        else:
-            logger.error(f"Failed to post processing message: {processing_response}")
-            respond(
-                {
-                    "response_type": "ephemeral",
-                    "text": "Failed to process request. Please try again.",
-                }
-            )
-
-    except Exception as e:
-        logger.error(f"Error handling jira slash command: {e}")
-        respond(
-            {
-                "response_type": "ephemeral",
-                "text": "Something went wrong. Please try again.",
-            }
-        )
-
-
 # Create Slack handler
 slack_handler = SlackRequestHandler(slack_app)
 
@@ -271,7 +212,7 @@ class BotRouter:
         self, request: Request, background_tasks: BackgroundTasks
     ):
         """
-        Unified endpoint that handles both JSON (API calls) and form data (Slack slash commands)
+        Simplified endpoint that handles both JSON (API calls) and form data (Slack slash commands)
         """
         try:
             content_type = request.headers.get("content-type", "").lower()
@@ -314,12 +255,11 @@ class BotRouter:
                     form_data = await request.form()
                     command = form_data.get("command", "")
                     text = form_data.get("text", "").strip()
-                    user_name = form_data.get("user_name", "Unknown")
-                    response_url = form_data.get("response_url", "")
                     channel_id = form_data.get("channel_id", "")
+                    response_url = form_data.get("response_url", "")  # NEED THIS!
 
                     logger.info(
-                        f"Slack - Command: {command}, Text: {text}, User: {user_name}, Channel: {channel_id}"
+                        f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}"
                     )
 
                     if command != "/jira":
@@ -331,19 +271,15 @@ class BotRouter:
                     if not text:
                         return {
                             "response_type": "ephemeral",
-                            "text": "Please provide a question. Example: `/jira what is the deployment process?`",
+                            "text": "Please provide a request. Example: `/jira create a bug in AI project`",
                         }
 
-                    # Start background processing with real timestamp capture
+                    # START BACKGROUND PROCESSING - DON'T WAIT!
                     background_tasks.add_task(
-                        self.process_slack_query_async_with_timestamp,
-                        text,
-                        user_name,
-                        response_url,
-                        channel_id,
+                        self.process_slash_command_async, text, channel_id, response_url
                     )
 
-                    # Return the original working response
+                    # RETURN IMMEDIATELY - NO PROCESSING HERE!
                     return {
                         "response_type": "in_channel",
                         "text": "⏳ Processing ...",
@@ -367,22 +303,21 @@ class BotRouter:
             logger.error(f"General error in handle_ask_query: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
-    async def process_slack_query_async_with_timestamp(
-        self,
-        query: str,
-        user_name: str,
-        response_url: str,
-        channel_id: str,
+    async def process_slash_command_async(
+        self, text: str, channel_id: str, response_url: str
     ):
-        """Background task that captures real timestamp after posting"""
+        """Background task to process slash command and update message"""
         try:
-            logger.info(f"Starting background processing for query: {query}")
+            logger.info(f"Processing slash command in background: {text}")
+            logger.info(f"Channel ID available: {channel_id}")  # Debug log
 
-            # Process the query first
-            user_query = UserQuery(query=query)
-            result = await self.jira_service.process_query(user_query, channel_id, None)
+            # Process the query WITH channel_id (not None!)
+            user_query = UserQuery(query=text)
+            result = await self.jira_service.process_query(
+                user_query, channel_id, None
+            )  # Pass channel_id!
 
-            # Post the result and capture real timestamp
+            # Post result to channel and get real timestamp
             try:
                 from slack_sdk import WebClient
 
@@ -396,27 +331,26 @@ class BotRouter:
                 )
 
                 if response["ok"]:
-                    real_message_id = response["ts"]  # Real timestamp!
-                    logger.info(f"Posted result with real timestamp: {real_message_id}")
+                    real_timestamp = response["ts"]
+                    logger.info(f"Posted result with real timestamp: {real_timestamp}")
 
-                    # Now process again with real timestamp for tracking
+                    # Process again with BOTH channel_id and real timestamp for tracking
                     await self.jira_service.process_query(
-                        user_query, channel_id, real_message_id
+                        user_query, channel_id, real_timestamp  # Both parameters!
                     )
 
-                    # Delete the "Processing..." message via response_url
-                    delete_response = {
-                        "response_type": "in_channel",
-                        "replace_original": True,
-                        "delete_original": True,
-                        "text": "",
-                    }
+                # Replace the "Processing..." message
+                final_response = {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "text": "",  # Empty to remove the processing message
+                }
 
-                    requests.post(response_url, json=delete_response, timeout=10)
+                requests.post(response_url, json=final_response, timeout=10)
 
             except Exception as post_error:
                 logger.error(f"Error posting result: {post_error}")
-                # Fallback to response_url
+                # Fallback: update via response_url
                 final_response = {
                     "response_type": "in_channel",
                     "replace_original": True,
@@ -425,72 +359,16 @@ class BotRouter:
                 requests.post(response_url, json=final_response, timeout=30)
 
         except Exception as e:
-            logger.error(f"Error in background task: {e}")
-
-    async def process_slack_query_async(
-        self,
-        query: str,
-        user_name: str,
-        response_url: str,
-        channel_id: str = None,
-        message_id: str = None,
-    ):
-        """
-        Background task to process the actual query and send response to Slack
-        """
-        try:
-            logger.info(f"Starting background processing for query: {query}")
-            logger.info(f"Channel: {channel_id}, Message ID: {message_id}")
-
-            await asyncio.sleep(1)
-
-            user_query = UserQuery(query=query)
-            result = await self.jira_service.process_query(
-                user_query, channel_id, message_id
-            )
-
-            logger.info(f"Query processed successfully")
-
-            # If we have a real message_id, update the original message directly
-            if channel_id and message_id and "." in str(message_id):
-                try:
-                    from slack_sdk import WebClient
-
-                    client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
-
-                    client.chat_update(
-                        channel=channel_id, ts=message_id, text=result.get("data", "")
-                    )
-                    logger.info(f"Successfully updated original message {message_id}")
-                    return
-                except Exception as update_error:
-                    logger.warning(f"Failed to update original message: {update_error}")
-                    # Fall back to response_url method
-
-            # Fallback: use response_url
-            final_response = {
-                "response_type": "in_channel",
-                "replace_original": True,
-                "text": f"{result.get('data', '')}",
-            }
-
-            response = requests.post(
-                response_url,
-                json=final_response,
-                headers={"Content-Type": "application/json"},
-                timeout=30,
-            )
-
-            if response.status_code == 200:
-                logger.info(f"Successfully sent final response to Slack")
-            else:
-                logger.error(
-                    f"Failed to send response to Slack: {response.status_code}"
-                )
-
-        except Exception as e:
-            logger.error(f"Error in background task: {e}", exc_info=True)
-            # Handle errors same as before...
+            logger.error(f"Error in background slash command processing: {e}")
+            try:
+                error_response = {
+                    "response_type": "in_channel",
+                    "replace_original": True,
+                    "text": "Sorry, something went wrong while processing your request.",
+                }
+                requests.post(response_url, json=error_response, timeout=10)
+            except Exception as send_error:
+                logger.error(f"Failed to send error response: {send_error}")
 
 
 def create_app():

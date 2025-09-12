@@ -25,7 +25,7 @@ class Utils:
     # ========================================
 
     def extract_chat(self, channel_id):
-        """Extract raw chat history - let agent interpret context."""
+        """Extract and format chat history with proper context for the agent."""
         if not channel_id:
             return ""
 
@@ -45,18 +45,138 @@ class Utils:
                 limit=200,
             )
 
-            formatted_messages = []
-            for msg in resp["messages"]:
-                ts = datetime.fromtimestamp(float(msg["ts"]), tz=timezone.utc)
-                time_str = ts.strftime("%H:%M:%S")
-                user = msg.get("user", "bot")
-                text = msg.get("text", "")
-                formatted_messages.append(f"[{time_str}] {user}: {text}")
+            if not resp.get("ok"):
+                logger.error(f"Slack API error: {resp.get('error')}")
+                return ""
 
-            return "\n".join(reversed(formatted_messages))
+            messages = resp.get("messages", [])
+            if not messages:
+                return ""
+
+            # Get user info for better formatting
+            user_cache = {}
+            
+            def get_user_name(user_id):
+                if user_id in user_cache:
+                    return user_cache[user_id]
+                
+                if not user_id or user_id == "bot":
+                    return "Bot"
+                    
+                try:
+                    user_info = client.users_info(user=user_id)
+                    if user_info.get("ok"):
+                        name = user_info["user"].get("display_name") or user_info["user"].get("real_name") or user_id
+                        user_cache[user_id] = name
+                        return name
+                except:
+                    pass
+                
+                user_cache[user_id] = user_id
+                return user_id
+
+            formatted_messages = []
+            jira_related_messages = []
+            
+            for msg in messages:
+                try:
+                    ts = datetime.fromtimestamp(float(msg["ts"]), tz=timezone.utc)
+                    time_str = ts.strftime("%H:%M")
+                    
+                    user_id = msg.get("user", "bot")
+                    user_name = get_user_name(user_id)
+                    text = msg.get("text", "").strip()
+                    
+                    # Skip empty messages
+                    if not text:
+                        continue
+                    
+                    # Clean up Slack formatting
+                    import re
+                    # Remove user mentions formatting but keep the name
+                    text = re.sub(r'<@([A-Z0-9]+)>', lambda m: f"@{get_user_name(m.group(1))}", text)
+                    # Remove channel references
+                    text = re.sub(r'<#([A-Z0-9]+)\|([^>]+)>', r'#\2', text)
+                    # Remove URLs formatting but keep the URL
+                    text = re.sub(r'<(https?://[^>|]+)(\|([^>]+))?>', r'\1', text)
+                    
+                    message_type = ""
+                    is_jira_related = False
+                    
+                    # Identify message types
+                    if text.startswith("/jiratest"):
+                        message_type = "[SLASH COMMAND]"
+                        is_jira_related = True
+                    elif user_name == "Bot" or "jira" in user_name.lower():
+                        message_type = "[BOT RESPONSE]" 
+                        is_jira_related = True
+                    elif any(keyword in text.lower() for keyword in [
+                        "create", "assign", "ticket", "story", "bug", "task", "epic", 
+                        "jira", "issue", "priority", "sprint", "project"
+                    ]):
+                        message_type = "[JIRA REQUEST]"
+                        is_jira_related = True
+                    else:
+                        message_type = "[MESSAGE]"
+                    
+                    # Format the message
+                    formatted_msg = f"{time_str} {message_type} {user_name}: {text}"
+                    formatted_messages.append(formatted_msg)
+                    
+                    if is_jira_related:
+                        jira_related_messages.append(formatted_msg)
+                        
+                except Exception as msg_error:
+                    logger.warning(f"Error formatting message: {msg_error}")
+                    continue
+
+            # Create comprehensive chat history
+            if not formatted_messages:
+                return ""
+                
+            # Reverse to show chronological order (oldest first)
+            all_messages = list(reversed(formatted_messages))
+            jira_messages = list(reversed(jira_related_messages))
+            
+            # Build formatted output
+            result_parts = []
+            
+            # Recent conversation context (last 20 messages)
+            recent_messages = all_messages[-20:] if len(all_messages) > 20 else all_messages
+            
+            if recent_messages:
+                result_parts.append("=== RECENT CONVERSATION ===")
+                result_parts.extend(recent_messages)
+                result_parts.append("")
+            
+            # Jira-specific context if different from recent
+            if jira_messages and len(jira_messages) > 5:
+                jira_context = jira_messages[-10:]  # Last 10 Jira-related messages
+                if jira_context != recent_messages[-len(jira_context):]:
+                    result_parts.append("=== JIRA-RELATED HISTORY ===")
+                    result_parts.extend(jira_context)
+                    result_parts.append("")
+            
+            # Summary for the agent
+            total_messages = len(all_messages)
+            jira_count = len(jira_messages)
+            
+            result_parts.append("=== CONTEXT SUMMARY ===")
+            result_parts.append(f"Total messages today: {total_messages}")
+            result_parts.append(f"Jira-related messages: {jira_count}")
+            
+            # Identify any ongoing conversations or patterns
+            if jira_messages:
+                last_jira = jira_messages[-1] if jira_messages else None
+                if last_jira and "[BOT RESPONSE]" not in last_jira:
+                    result_parts.append("Note: Last Jira interaction may need follow-up")
+            
+            return "\n".join(result_parts)
+
         except Exception as e:
             logger.error(f"Error extracting chat: {e}")
             return ""
+
 
     def format_for_slack(self, text: str) -> str:
         """Format response text for Slack markdown with clickable issue keys."""
@@ -182,6 +302,9 @@ class Utils:
         except Exception as e:
             logger.error(f"Error finding user '{query}' in project {project_key}: {e}")
             return None
+
+
+
 
     def get_user_suggestions_text(self, project_key: str, limit: int = 10) -> str:
         """Get formatted text list of available users for assignment suggestions."""
@@ -331,6 +454,7 @@ class Utils:
         except Exception as e:
             logger.error(f"Error getting issue types: {e}")
             return {}
+
 
     def get_create_fields(self, project_key: str, issue_type_name: str) -> set:
         """Get fields allowed on create screen."""
@@ -1423,7 +1547,7 @@ class Utils:
 
         with open("slack_message.json", "r") as file:
             data = json.load(file)
-
+        
         for item in data:
             if item.get("issue_key") == issueKey:
                 print("Issue key matched")
