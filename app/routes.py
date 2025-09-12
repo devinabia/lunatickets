@@ -309,10 +309,13 @@ class BotRouter:
         """Background task to process slash command and update message"""
         try:
             logger.info(f"Processing slash command in background: {text}")
+            logger.info(f"Channel ID available: {channel_id}")  # Debug log
 
-            # Process the query
+            # Process the query WITH channel_id (not None!)
             user_query = UserQuery(query=text)
-            result = await self.jira_service.process_query(user_query, None, None)
+            result = await self.jira_service.process_query(
+                user_query, channel_id, None
+            )  # Pass channel_id!
 
             # Post result to channel and get real timestamp
             try:
@@ -331,9 +334,9 @@ class BotRouter:
                     real_timestamp = response["ts"]
                     logger.info(f"Posted result with real timestamp: {real_timestamp}")
 
-                    # Process again with real timestamp for tracking
+                    # Process again with BOTH channel_id and real timestamp for tracking
                     await self.jira_service.process_query(
-                        user_query, channel_id, real_timestamp
+                        user_query, channel_id, real_timestamp  # Both parameters!
                     )
 
                 # Replace the "Processing..." message
