@@ -520,7 +520,7 @@ Return only the grammatically corrected request:"""
                     logger.info(f"Is creation: {is_creation}")
 
                     # TEMPORARY: Force save for debugging
-                    if True:  # Change this to 'if is_creation:' after debugging
+                    if is_creation:  # Change this to 'if is_creation:' after debugging
                         try:
                             logger.info("Attempting to save tracking data...")
                             channel_name = self.utils.get_channel_name(channel_id)
