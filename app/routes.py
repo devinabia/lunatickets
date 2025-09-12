@@ -256,6 +256,7 @@ class BotRouter:
                     command = form_data.get("command", "")
                     text = form_data.get("text", "").strip()
                     channel_id = form_data.get("channel_id", "")
+                    response_url = form_data.get("response_url", "")  # NEED THIS!
 
                     logger.info(
                         f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}"
@@ -273,42 +274,16 @@ class BotRouter:
                             "text": "Please provide a request. Example: `/jiratest create a bug in AI project`",
                         }
 
-                    # Process query immediately
-                    user_query = UserQuery(query=text)
-                    result = await self.jira_service.process_query(
-                        user_query, None, None
-                    )  # No tracking initially
+                    # START BACKGROUND PROCESSING - DON'T WAIT!
+                    background_tasks.add_task(
+                        self.process_slash_command_async, text, channel_id, response_url
+                    )
 
-                    # Post result and get real timestamp for tracking
-                    try:
-                        from slack_sdk import WebClient
-
-                        client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
-
-                        response = client.chat_postMessage(
-                            channel=channel_id,
-                            text=result.get("data", ""),
-                            unfurl_links=True,
-                            unfurl_media=True,
-                        )
-
-                        if response["ok"]:
-                            real_timestamp = response["ts"]
-                            logger.info(f"Posted with real timestamp: {real_timestamp}")
-
-                            # Now process again with real timestamp for tracking
-                            await self.jira_service.process_query(
-                                user_query, channel_id, real_timestamp
-                            )
-
-                        return {"text": ""}  # Empty response since we already posted
-
-                    except Exception as e:
-                        logger.error(f"Error posting: {e}")
-                        return {
-                            "response_type": "in_channel",
-                            "text": result.get("data", ""),
-                        }
+                    # RETURN IMMEDIATELY - NO PROCESSING HERE!
+                    return {
+                        "response_type": "in_channel",
+                        "text": "⏳ Processing ...",
+                    }
 
                 except Exception as e:
                     logger.error(f"Slack processing error: {e}")
