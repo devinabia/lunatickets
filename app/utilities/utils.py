@@ -1413,6 +1413,7 @@ class Utils:
             return ""
 
     def postStatusMsgToSlack(issueKey: str, status_name: str):
+        print("Entered in postStatusMsgToSlack")
         emoji_dict = {
             "done": "✅",
             "progress": "🔄",
@@ -1425,17 +1426,20 @@ class Utils:
 
         for item in data:
             if item.get("issue_key") == issueKey:
+                print("Issue key matched")
                 completed_message = f"The ticket {issueKey} has status: {status_name}"
                 channel_id = item.get("channel_id")
                 thread_ts = item.get("message_id")
 
                 if not Utils.checkLastMsg(channel_id, thread_ts, completed_message):
+                    print("Posting status message to Slack")
                     m_emoji = emoji_dict.get(status_name.lower(), "👋")
-                    client.chat_postMessage(
+                    response = client.chat_postMessage(
                         channel=channel_id,
                         text=f"{m_emoji} {completed_message}",
                         thread_ts=thread_ts,
                     )
+                    print(response)
         return True
 
     def checkLastMsg(channel_id: str, thread_ts: str, complete_msg: str) -> bool:
