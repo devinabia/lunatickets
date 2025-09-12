@@ -256,13 +256,12 @@ class BotRouter:
                     command = form_data.get("command", "")
                     text = form_data.get("text", "").strip()
                     channel_id = form_data.get("channel_id", "")
-                    response_url = form_data.get("response_url", "")  # NEED THIS!
 
                     logger.info(
                         f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}"
                     )
 
-                    if command != "/jira":
+                    if command != "/jiratest":
                         return {
                             "response_type": "ephemeral",
                             "text": f"Unknown command: {command}",
@@ -271,19 +270,45 @@ class BotRouter:
                     if not text:
                         return {
                             "response_type": "ephemeral",
-                            "text": "Please provide a request. Example: `/jira create a bug in AI project`",
+                            "text": "Please provide a request. Example: `/jiratest create a bug in AI project`",
                         }
 
-                    # START BACKGROUND PROCESSING - DON'T WAIT!
-                    background_tasks.add_task(
-                        self.process_slash_command_async, text, channel_id, response_url
-                    )
+                    # Process query immediately
+                    user_query = UserQuery(query=text)
+                    result = await self.jira_service.process_query(
+                        user_query, None, None
+                    )  # No tracking initially
 
-                    # RETURN IMMEDIATELY - NO PROCESSING HERE!
-                    return {
-                        "response_type": "in_channel",
-                        "text": "⏳ Processing ...",
-                    }
+                    # Post result and get real timestamp for tracking
+                    try:
+                        from slack_sdk import WebClient
+
+                        client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+                        response = client.chat_postMessage(
+                            channel=channel_id,
+                            text=result.get("data", ""),
+                            unfurl_links=True,
+                            unfurl_media=True,
+                        )
+
+                        if response["ok"]:
+                            real_timestamp = response["ts"]
+                            logger.info(f"Posted with real timestamp: {real_timestamp}")
+
+                            # Now process again with real timestamp for tracking
+                            await self.jira_service.process_query(
+                                user_query, channel_id, real_timestamp
+                            )
+
+                        return {"text": ""}  # Empty response since we already posted
+
+                    except Exception as e:
+                        logger.error(f"Error posting: {e}")
+                        return {
+                            "response_type": "in_channel",
+                            "text": result.get("data", ""),
+                        }
 
                 except Exception as e:
                     logger.error(f"Slack processing error: {e}")
@@ -309,13 +334,10 @@ class BotRouter:
         """Background task to process slash command and update message"""
         try:
             logger.info(f"Processing slash command in background: {text}")
-            logger.info(f"Channel ID available: {channel_id}")  # Debug log
 
-            # Process the query WITH channel_id (not None!)
+            # Process the query
             user_query = UserQuery(query=text)
-            result = await self.jira_service.process_query(
-                user_query, channel_id, None
-            )  # Pass channel_id!
+            result = await self.jira_service.process_query(user_query, None, None)
 
             # Post result to channel and get real timestamp
             try:
@@ -334,9 +356,9 @@ class BotRouter:
                     real_timestamp = response["ts"]
                     logger.info(f"Posted result with real timestamp: {real_timestamp}")
 
-                    # Process again with BOTH channel_id and real timestamp for tracking
+                    # Process again with real timestamp for tracking
                     await self.jira_service.process_query(
-                        user_query, channel_id, real_timestamp  # Both parameters!
+                        user_query, channel_id, real_timestamp
                     )
 
                 # Replace the "Processing..." message
