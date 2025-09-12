@@ -262,7 +262,7 @@ class BotRouter:
                         f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}"
                     )
 
-                    if command != "/jiratest":
+                    if command != "/jira":
                         return {
                             "response_type": "ephemeral",
                             "text": f"Unknown command: {command}",
@@ -271,7 +271,7 @@ class BotRouter:
                     if not text:
                         return {
                             "response_type": "ephemeral",
-                            "text": "Please provide a request. Example: `/jiratest create a bug in AI project`",
+                            "text": "Please provide a request. Example: `/jira create a bug in AI project`",
                         }
 
                     # START BACKGROUND PROCESSING - DON'T WAIT!
