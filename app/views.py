@@ -457,7 +457,7 @@ Return only the grammatically corrected request:"""
                 )
                 logger.info(f"Extracted issue key: {issue_key}")
 
-                # Check if this is a creation response
+                # ENHANCED creation detection - handle both single-step and multi-step scenarios
                 response_lower = formatted_response.lower()
                 creation_keywords = [
                     "successfully created",
@@ -473,10 +473,32 @@ Return only the grammatically corrected request:"""
                     "new ticket created",
                     "issue has been created",
                     "ticket created",
+                    "i've created the ticket",  # Added for multi-step
+                    "created the ticket for you",  # Added for multi-step
                 ]
 
+                # Also check if we have an issue key and success language
+                has_issue_key = bool(issue_key)
+                success_indicators = [
+                    "let me know if there's anything else",
+                    "ticket for you",
+                    "assigned to",
+                    "has been assigned",
+                ]
+
+                has_success_language = any(
+                    indicator in response_lower for indicator in success_indicators
+                )
+
+                # More flexible creation detection
                 is_creation = any(
                     keyword in response_lower for keyword in creation_keywords
+                ) or (
+                    has_issue_key and has_success_language and len(response_lower) > 50
+                )  # Substantial response with issue key
+
+                logger.info(
+                    f"Is creation: {is_creation} (keywords: {any(keyword in response_lower for keyword in creation_keywords)}, issue_key: {has_issue_key}, success_language: {has_success_language})"
                 )
 
                 # If this is a creation and we have channel_id, post success message and track
@@ -519,7 +541,7 @@ Return only the grammatically corrected request:"""
                                 # Save tracking data with user trigger timestamp
                                 channel_name = self.utils.get_channel_name(channel_id)
                                 self.utils.save_slack_tracking_data(
-                                    message_id=user_trigger_timestamp,  # Real user message!
+                                    message_id=user_trigger_timestamp,  # Original creation request!
                                     channel_id=channel_id,
                                     channel_name=channel_name,
                                     issue_key=issue_key,
@@ -572,15 +594,17 @@ Return only the grammatically corrected request:"""
     def find_user_trigger_from_success(
         self, channel_id: str, success_timestamp: str, original_query: str
     ) -> str:
-        """Find user trigger by working backwards from success message"""
+        """Find user trigger by working backwards from success message - handle multi-step creation"""
         try:
             from slack_sdk import WebClient
 
             client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
-            # Get recent message history
+            # Get recent message history (more messages for multi-step scenarios)
             response = client.conversations_history(
-                channel=channel_id, limit=30, inclusive=True
+                channel=channel_id,
+                limit=50,  # Increased limit for multi-step conversations
+                inclusive=True,
             )
 
             if not response["ok"]:
@@ -601,8 +625,13 @@ Return only the grammatically corrected request:"""
                 logger.warning("Could not find success message in history")
                 return None
 
-            # Work backwards to find pattern: success → processing → user trigger
-            query_words = original_query.lower().split()[:5]
+            # Look for the most recent user command that triggered this creation
+            # This could be either:
+            # 1. Original creation command (single-step)
+            # 2. Assignee specification command (multi-step)
+
+            immediate_trigger = None
+            original_creation_request = None
 
             for i in range(success_index - 1, -1, -1):  # Go backwards
                 msg = messages[i]
@@ -612,22 +641,46 @@ Return only the grammatically corrected request:"""
                 if msg.get("bot_id") or msg.get("user") in ["bot", None]:
                     continue
 
-                # Look for processing message
+                # Skip processing messages
                 if "processing" in text or "⏳" in text:
-                    logger.info(f"Found processing message at index {i}")
-                    continue  # Keep looking for user message before processing
+                    continue
 
-                # Look for user message that matches query
-                if any(word in text for word in query_words if len(word) > 3):
-                    logger.info(f"Found matching user trigger message: {msg['ts']}")
-                    return msg["ts"]
+                # Look for slash commands (could be immediate trigger)
+                if text.startswith("/jira"):
+                    if immediate_trigger is None:
+                        immediate_trigger = msg["ts"]
+                        logger.info(f"Found immediate trigger: {text[:50]}")
+
+                    # Check if this is a creation command
+                    creation_indicators = [
+                        "create",
+                        "ticket",
+                        "story",
+                        "task",
+                        "bug",
+                        "epic",
+                        "issue",
+                    ]
+
+                    if any(indicator in text for indicator in creation_indicators):
+                        original_creation_request = msg["ts"]
+                        logger.info(f"Found original creation request: {text[:50]}")
+                        break  # Found the original, stop looking
 
                 # Don't look too far back
-                if success_index - i > 10:
+                if success_index - i > 20:
                     break
 
-            logger.warning("Could not find user trigger message")
-            return None
+            # Decision logic: Use original creation request if found, otherwise use immediate trigger
+            if original_creation_request:
+                logger.info("Using original creation request timestamp for tracking")
+                return original_creation_request
+            elif immediate_trigger:
+                logger.info("Using immediate trigger timestamp for tracking")
+                return immediate_trigger
+            else:
+                logger.warning("Could not find any trigger message")
+                return None
 
         except Exception as e:
             logger.error(f"Error finding user trigger: {e}")
