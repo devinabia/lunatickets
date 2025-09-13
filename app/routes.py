@@ -311,29 +311,16 @@ class BotRouter:
             logger.info(f"Processing slash command in background: {text}")
             logger.info(f"Channel ID available: {channel_id}")
 
-            # STEP 1: First post "Processing..." message to get a timestamp
+            # DON'T post another processing message - we already have one!
+            # Just process the query directly
+            user_query = UserQuery(query=text)
+            result = await self.jira_service.process_query(user_query, channel_id, None)
+
+            # Post the actual result to channel and get timestamp
             from slack_sdk import WebClient
 
             client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
-            processing_response = client.chat_postMessage(
-                channel=channel_id, text="⏳ Processing..."
-            )
-
-            if not processing_response["ok"]:
-                logger.error("Failed to post processing message")
-                return
-
-            processing_timestamp = processing_response["ts"]
-            logger.info(
-                f"Posted processing message with timestamp: {processing_timestamp}"
-            )
-
-            # STEP 2: Process the query WITHOUT message_id first
-            user_query = UserQuery(query=text)
-            result = await self.jira_service.process_query(user_query, channel_id, None)
-
-            # STEP 3: Post the actual result
             result_response = client.chat_postMessage(
                 channel=channel_id,
                 text=result.get("data", ""),
@@ -345,39 +332,33 @@ class BotRouter:
                 result_timestamp = result_response["ts"]
                 logger.info(f"Posted result with timestamp: {result_timestamp}")
 
-                # STEP 4: Find the user's original command (message before processing)
-                original_user_timestamp = self.find_user_command_before_processing(
-                    channel_id, processing_timestamp, text
+                # Try to find user message before the result for tracking
+                user_timestamp = self.find_recent_user_message(
+                    channel_id, result_timestamp, text
                 )
 
-                if original_user_timestamp:
-                    logger.info(
-                        f"Found original user command timestamp: {original_user_timestamp}"
-                    )
-                    # Process again with the original user timestamp for tracking
+                if user_timestamp:
+                    logger.info(f"Found user message timestamp: {user_timestamp}")
+                    # Process again with user timestamp for tracking
                     await self.jira_service.process_query(
-                        user_query, channel_id, original_user_timestamp
+                        user_query, channel_id, user_timestamp
                     )
                 else:
-                    logger.info("Using processing timestamp as fallback")
-                    # Fallback: use processing timestamp for tracking
+                    logger.info("Using result timestamp as fallback for tracking")
+                    # Fallback: use result timestamp
                     await self.jira_service.process_query(
-                        user_query, channel_id, processing_timestamp
+                        user_query, channel_id, result_timestamp
                     )
 
-            # Clean up: delete the processing message
-            try:
-                client.chat_delete(channel=channel_id, ts=processing_timestamp)
-            except Exception as delete_error:
-                logger.warning(f"Could not delete processing message: {delete_error}")
-
-            # Replace the original "Processing..." response
+            # Replace the original "Processing..." message with empty content
             final_response = {
                 "response_type": "in_channel",
                 "replace_original": True,
-                "text": "",  # Empty to remove
+                "text": "",  # Empty to remove the processing message
             }
+
             requests.post(response_url, json=final_response, timeout=10)
+            logger.info("Cleared original processing message")
 
         except Exception as e:
             logger.error(f"Error in background slash command processing: {e}")
@@ -390,6 +371,68 @@ class BotRouter:
                 requests.post(response_url, json=error_response, timeout=10)
             except Exception as send_error:
                 logger.error(f"Failed to send error response: {send_error}")
+
+    def find_recent_user_message(
+        self, channel_id: str, result_timestamp: str, original_query: str
+    ) -> str:
+        """Find a recent user message that might be related to the command"""
+        try:
+            from slack_sdk import WebClient
+
+            client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+            # Get recent message history (last 10 messages should be enough)
+            response = client.conversations_history(
+                channel=channel_id, limit=10, inclusive=True
+            )
+
+            if not response["ok"]:
+                logger.error(f"Failed to get message history: {response['error']}")
+                return None
+
+            messages = response["messages"]
+
+            # Sort by timestamp (oldest first)
+            messages.sort(key=lambda x: float(x["ts"]))
+
+            # Find the result message position
+            result_index = None
+            for i, msg in enumerate(messages):
+                if msg["ts"] == result_timestamp:
+                    result_index = i
+                    break
+
+            if result_index is None:
+                logger.warning("Could not find result message in history")
+                return None
+
+            # Look for user messages before the result (go backwards from result)
+            query_words = original_query.lower().split()[:5]
+
+            for i in range(result_index - 1, -1, -1):  # Go backwards
+                msg = messages[i]
+
+                # Skip bot messages
+                if msg.get("bot_id") or msg.get("user") == "bot":
+                    continue
+
+                text = msg.get("text", "").lower()
+
+                # Look for messages that might be related to the query
+                if any(word in text for word in query_words if len(word) > 3):
+                    logger.info(f"Found related user message: {msg['ts']}")
+                    return msg["ts"]
+
+                # Don't look too far back (only last 5 user messages)
+                if result_index - i > 5:
+                    break
+
+            logger.info("No related user message found in recent history")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding recent user message: {e}")
+            return None
 
     def find_user_command_before_processing(
         self, channel_id: str, processing_timestamp: str, original_query: str
