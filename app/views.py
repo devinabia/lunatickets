@@ -415,17 +415,14 @@ Return only the grammatically corrected request:"""
             logger.info(f"Processing query: {user_query.query}")
             logger.info(f"Channel ID: {channel_id}")
 
-            # Get raw chat history - no interpretation
+            # Get raw chat history
             chat_history_string = self.utils.extract_chat(channel_id)
 
-            # KEEP THIS - Important query refinement functionality
+            # Query refinement
             refined_query = await self.refactor_query_with_context(
                 user_query.query, chat_history_string
             )
-            logger.info(f"Original query: {user_query.query}")
-            logger.info(f"Refined query: {refined_query}")
 
-            # Give refined query and context to the agent
             content = f"""
     USER QUERY: {refined_query}
 
@@ -441,7 +438,7 @@ Return only the grammatically corrected request:"""
     - Call the appropriate tool based on your analysis of the refined query
     """
 
-            # Execute with single agent using refined query
+            # Execute with agent
             result = self.jira_agent.invoke(
                 {"messages": [{"role": "user", "content": content}]}
             )
@@ -451,13 +448,13 @@ Return only the grammatically corrected request:"""
                 response_content = final_message.content
                 formatted_response = self.utils.format_for_slack(response_content)
 
-                # Extract issue key from response
+                # Extract issue key
                 issue_key = self.utils.extract_issue_key_from_response(
                     formatted_response
                 )
                 logger.info(f"Extracted issue key: {issue_key}")
 
-                # ENHANCED creation detection - handle both single-step and multi-step scenarios
+                # IMPROVED creation detection - check for both creation keywords AND issue key pattern
                 response_lower = formatted_response.lower()
                 creation_keywords = [
                     "successfully created",
@@ -473,38 +470,30 @@ Return only the grammatically corrected request:"""
                     "new ticket created",
                     "issue has been created",
                     "ticket created",
-                    "i've created the ticket",  # Added for multi-step
-                    "created the ticket for you",  # Added for multi-step
+                    "i've created the ticket",  # Add this for second command
+                    "created the ticket for you",  # And this
                 ]
 
-                # Also check if we have an issue key and success language
-                has_issue_key = bool(issue_key)
-                success_indicators = [
-                    "let me know if there's anything else",
-                    "ticket for you",
-                    "assigned to",
-                    "has been assigned",
-                ]
-
-                has_success_language = any(
-                    indicator in response_lower for indicator in success_indicators
-                )
-
-                # More flexible creation detection
-                is_creation = any(
+                # Enhanced creation detection: keywords OR (issue key + assignment confirmation)
+                has_creation_keywords = any(
                     keyword in response_lower for keyword in creation_keywords
-                ) or (
-                    has_issue_key and has_success_language and len(response_lower) > 50
-                )  # Substantial response with issue key
-
-                logger.info(
-                    f"Is creation: {is_creation} (keywords: {any(keyword in response_lower for keyword in creation_keywords)}, issue_key: {has_issue_key}, success_language: {has_success_language})"
+                )
+                has_assignment_confirmation = issue_key and (
+                    "assigned to" in response_lower
+                    or "has been assigned" in response_lower
                 )
 
-                # If this is a creation and we have channel_id, post success message and track
+                is_creation = has_creation_keywords or has_assignment_confirmation
+                logger.info(
+                    f"Is creation - keywords: {has_creation_keywords}, assignment: {has_assignment_confirmation}, final: {is_creation}"
+                )
+
+                posted_to_slack = False
+
+                # If this is a creation and we have channel_id, post to Slack and track
                 if is_creation and channel_id and issue_key:
                     logger.info(
-                        "This is a creation response - posting success message and tracking"
+                        "This is a creation response - posting to Slack and tracking"
                     )
 
                     try:
@@ -512,7 +501,7 @@ Return only the grammatically corrected request:"""
 
                         client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
-                        # Post the success message
+                        # Post success message to Slack
                         success_response = client.chat_postMessage(
                             channel=channel_id,
                             text=formatted_response,
@@ -525,8 +514,9 @@ Return only the grammatically corrected request:"""
                             logger.info(
                                 f"Posted success message with timestamp: {success_timestamp}"
                             )
+                            posted_to_slack = True
 
-                            # Now find the original user trigger by working backwards
+                            # Find user trigger by working backwards
                             user_trigger_timestamp = (
                                 self.find_user_trigger_from_success(
                                     channel_id, success_timestamp, user_query.query
@@ -537,28 +527,28 @@ Return only the grammatically corrected request:"""
                                 logger.info(
                                     f"Found user trigger timestamp: {user_trigger_timestamp}"
                                 )
+                            else:
+                                # For two-part creation, look for the FIRST command that started the process
+                                user_trigger_timestamp = (
+                                    self.find_creation_starter_command(
+                                        channel_id, success_timestamp
+                                    )
+                                )
+                                logger.info(
+                                    f"Found creation starter timestamp: {user_trigger_timestamp}"
+                                )
 
-                                # Save tracking data with user trigger timestamp
+                            if user_trigger_timestamp:
+                                # Save tracking data
                                 channel_name = self.utils.get_channel_name(channel_id)
                                 self.utils.save_slack_tracking_data(
-                                    message_id=user_trigger_timestamp,  # Original creation request!
+                                    message_id=user_trigger_timestamp,
                                     channel_id=channel_id,
                                     channel_name=channel_name,
                                     issue_key=issue_key,
                                 )
                                 logger.info(
                                     f"✅ Successfully saved tracking data for issue {issue_key}"
-                                )
-                            else:
-                                logger.warning(
-                                    "Could not find user trigger - using success timestamp as fallback"
-                                )
-                                channel_name = self.utils.get_channel_name(channel_id)
-                                self.utils.save_slack_tracking_data(
-                                    message_id=success_timestamp,
-                                    channel_id=channel_id,
-                                    channel_name=channel_name,
-                                    issue_key=issue_key,
                                 )
 
                     except Exception as post_error:
@@ -571,6 +561,7 @@ Return only the grammatically corrected request:"""
                     "query": user_query.query,
                     "refined_query": refined_query,
                     "issue_key": issue_key,
+                    "posted_to_slack": posted_to_slack,  # Tell background task we handled Slack
                 }
             else:
                 return {
@@ -590,7 +581,72 @@ Return only the grammatically corrected request:"""
                 "query": user_query.query,
             }
 
-    # STEP 3: Add method to find user trigger by working backwards from success message
+    # STEP 3: Add method to find the original creation starter command
+    def find_creation_starter_command(
+        self, channel_id: str, success_timestamp: str
+    ) -> str:
+        """Find the original command that started the creation process (for two-part creation)"""
+        try:
+            from slack_sdk import WebClient
+
+            client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+            response = client.conversations_history(
+                channel=channel_id,
+                limit=50,  # Look further back for two-part creation
+                inclusive=True,
+            )
+
+            if not response["ok"]:
+                return None
+
+            messages = response["messages"]
+            messages.sort(key=lambda x: float(x["ts"]))
+
+            # Find success message index
+            success_index = None
+            for i, msg in enumerate(messages):
+                if msg["ts"] == success_timestamp:
+                    success_index = i
+                    break
+
+            if success_index is None:
+                return None
+
+            # Look for the pattern: creation command → assignee question → assignee response → success
+            creation_starters = [
+                "create",
+                "new",
+                "ticket",
+                "story",
+                "bug",
+                "task",
+                "epic",
+            ]
+
+            for i in range(success_index - 1, -1, -1):
+                msg = messages[i]
+                text = msg.get("text", "").lower()
+
+                # Skip bot messages
+                if msg.get("bot_id") or msg.get("user") in ["bot", None]:
+                    continue
+
+                # Look for original creation command
+                if any(starter in text for starter in creation_starters):
+                    logger.info(f"Found creation starter command: {msg['ts']}")
+                    return msg["ts"]
+
+                # Don't look too far back
+                if success_index - i > 20:
+                    break
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding creation starter: {e}")
+            return None
+
     def find_user_trigger_from_success(
         self, channel_id: str, success_timestamp: str, original_query: str
     ) -> str:
