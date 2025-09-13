@@ -414,7 +414,6 @@ Return only the grammatically corrected request:"""
         try:
             logger.info(f"Processing query: {user_query.query}")
             logger.info(f"Channel ID: {channel_id}")
-            logger.info(f"Message ID: {message_id}")
 
             # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
@@ -452,79 +451,106 @@ Return only the grammatically corrected request:"""
                 response_content = final_message.content
                 formatted_response = self.utils.format_for_slack(response_content)
 
-                # Extract issue key from response for tracking
+                # Extract issue key from response
                 issue_key = self.utils.extract_issue_key_from_response(
                     formatted_response
                 )
                 logger.info(f"Extracted issue key: {issue_key}")
 
-                # SIMPLIFIED TRACKING - remove complex logic, just use what we have
-                if channel_id and issue_key and message_id and formatted_response:
-                    logger.info("All required data present, checking for creation...")
+                # Check if this is a creation response
+                response_lower = formatted_response.lower()
+                creation_keywords = [
+                    "successfully created",
+                    "created the jira issue",
+                    "created the story",
+                    "created the task",
+                    "created the bug",
+                    "created the epic",
+                    "i have successfully created",
+                    "i've created the",
+                    "created for you",
+                    "new jira issue",
+                    "new ticket created",
+                    "issue has been created",
+                    "ticket created",
+                ]
 
-                    response_lower = formatted_response.lower()
-                    creation_keywords = [
-                        "successfully created",
-                        "created the jira issue",
-                        "created the story",
-                        "created the task",
-                        "created the bug",
-                        "created the epic",
-                        "i have successfully created",
-                        "i've created the",
-                        "created for you",
-                        "new jira issue",
-                        "new ticket created",
-                        "created",  # More general keyword
-                        "issue has been created",
-                        "ticket created",
-                    ]
+                is_creation = any(
+                    keyword in response_lower for keyword in creation_keywords
+                )
 
-                    # Check if this is a creation response
-                    is_creation = any(
-                        keyword in response_lower for keyword in creation_keywords
+                # If this is a creation and we have channel_id, post success message and track
+                if is_creation and channel_id and issue_key:
+                    logger.info(
+                        "This is a creation response - posting success message and tracking"
                     )
-                    logger.info(f"Is creation: {is_creation}")
 
-                    if is_creation:
-                        try:
-                            logger.info("Attempting to save tracking data...")
-                            channel_name = self.utils.get_channel_name(channel_id)
-                            logger.info(f"Channel name: {channel_name}")
+                    try:
+                        from slack_sdk import WebClient
 
-                            # Use the message_id we have (no complex finding logic)
-                            self.utils.save_slack_tracking_data(
-                                message_id=message_id,  # Just use what we received
-                                channel_id=channel_id,
-                                channel_name=channel_name,
-                                issue_key=issue_key,
-                            )
+                        client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+
+                        # Post the success message
+                        success_response = client.chat_postMessage(
+                            channel=channel_id,
+                            text=formatted_response,
+                            unfurl_links=True,
+                            unfurl_media=True,
+                        )
+
+                        if success_response["ok"]:
+                            success_timestamp = success_response["ts"]
                             logger.info(
-                                f"✅ Successfully saved tracking data for issue {issue_key}"
+                                f"Posted success message with timestamp: {success_timestamp}"
                             )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ Error saving tracking data: {e}", exc_info=True
+
+                            # Now find the original user trigger by working backwards
+                            user_trigger_timestamp = (
+                                self.find_user_trigger_from_success(
+                                    channel_id, success_timestamp, user_query.query
+                                )
                             )
-                    else:
-                        logger.info("Not a creation response - no tracking data saved")
-                else:
-                    logger.info("Missing required data for tracking:")
-                    logger.info(f"  channel_id: {bool(channel_id)}")
-                    logger.info(f"  issue_key: {bool(issue_key)}")
-                    logger.info(f"  message_id: {bool(message_id)}")
-                    logger.info(f"  formatted_response: {bool(formatted_response)}")
+
+                            if user_trigger_timestamp:
+                                logger.info(
+                                    f"Found user trigger timestamp: {user_trigger_timestamp}"
+                                )
+
+                                # Save tracking data with user trigger timestamp
+                                channel_name = self.utils.get_channel_name(channel_id)
+                                self.utils.save_slack_tracking_data(
+                                    message_id=user_trigger_timestamp,  # Real user message!
+                                    channel_id=channel_id,
+                                    channel_name=channel_name,
+                                    issue_key=issue_key,
+                                )
+                                logger.info(
+                                    f"✅ Successfully saved tracking data for issue {issue_key}"
+                                )
+                            else:
+                                logger.warning(
+                                    "Could not find user trigger - using success timestamp as fallback"
+                                )
+                                channel_name = self.utils.get_channel_name(channel_id)
+                                self.utils.save_slack_tracking_data(
+                                    message_id=success_timestamp,
+                                    channel_id=channel_id,
+                                    channel_name=channel_name,
+                                    issue_key=issue_key,
+                                )
+
+                    except Exception as post_error:
+                        logger.error(f"Error posting success message: {post_error}")
 
                 return {
                     "success": True,
                     "message": "Jira operation completed",
                     "data": formatted_response,
                     "query": user_query.query,
-                    "refined_query": refined_query,  # Include refined query in response
+                    "refined_query": refined_query,
                     "issue_key": issue_key,
                 }
             else:
-                logger.error("No response generated from Jira processing")
                 return {
                     "success": False,
                     "message": "No response generated from Jira processing",
@@ -542,26 +568,19 @@ Return only the grammatically corrected request:"""
                 "query": user_query.query,
             }
 
-    def find_original_slash_command(
-        self, channel_id: str, current_message_id: str, query: str
+    # STEP 3: Add method to find user trigger by working backwards from success message
+    def find_user_trigger_from_success(
+        self, channel_id: str, success_timestamp: str, original_query: str
     ) -> str:
-        """
-        Find the original slash command message by looking backwards through message history
-
-        Message chain:
-        1. /jiratest create story... (original slash command - WANT THIS)
-        2. ⏳ Processing... (bot processing message)
-        3. ✅ [answer] (AI response message - current_message_id)
-        """
+        """Find user trigger by working backwards from success message"""
         try:
             from slack_sdk import WebClient
-            import os
 
             client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
-            # Get recent message history (last 20 messages should be enough)
+            # Get recent message history
             response = client.conversations_history(
-                channel=channel_id, limit=20, inclusive=True
+                channel=channel_id, limit=30, inclusive=True
             )
 
             if not response["ok"]:
@@ -569,94 +588,47 @@ Return only the grammatically corrected request:"""
                 return None
 
             messages = response["messages"]
-            logger.info(f"Found {len(messages)} messages in history")
+            messages.sort(key=lambda x: float(x["ts"]))  # Sort by timestamp
 
-            # Sort messages by timestamp (oldest first)
-            messages.sort(key=lambda x: float(x["ts"]))
-
-            # Find the current message index
-            current_index = None
+            # Find success message index
+            success_index = None
             for i, msg in enumerate(messages):
-                if msg["ts"] == current_message_id:
-                    current_index = i
+                if msg["ts"] == success_timestamp:
+                    success_index = i
                     break
 
-            if current_index is None:
-                logger.warning(
-                    f"Could not find current message {current_message_id} in history"
-                )
-                # Fallback: look for processing message and slash command pattern
-                return self.find_slash_command_fallback(messages, query)
+            if success_index is None:
+                logger.warning("Could not find success message in history")
+                return None
 
-            logger.info(f"Current message found at index {current_index}")
+            # Work backwards to find pattern: success → processing → user trigger
+            query_words = original_query.lower().split()[:5]
 
-            # Look backwards from current message to find the pattern:
-            # 1. Current message (AI response) - index current_index
-            # 2. Processing message - index current_index-1
-            # 3. Slash command or user message - index current_index-2
-
-            # Check if there's a processing message before current
-            if current_index >= 1:
-                processing_msg = messages[current_index - 1]
-                logger.info(
-                    f"Potential processing message: {processing_msg.get('text', '')[:50]}"
-                )
-
-                # Check if it looks like a processing message
-                processing_text = processing_msg.get("text", "").lower()
-                if "processing" in processing_text or "⏳" in processing_text:
-                    logger.info("Found processing message")
-
-                    # Look for slash command or user message before processing
-                    if current_index >= 2:
-                        slash_msg = messages[current_index - 2]
-                        logger.info(
-                            f"Potential slash command: {slash_msg.get('text', '')[:50]}"
-                        )
-
-                        # Check if this looks like the original command
-                        slash_text = slash_msg.get("text", "")
-                        if slash_text.startswith("/jiratest") or any(
-                            word in slash_text.lower()
-                            for word in query.lower().split()[:3]
-                        ):
-                            logger.info(
-                                f"Found matching slash command: {slash_msg['ts']}"
-                            )
-                            return slash_msg["ts"]
-
-            # Fallback: search for any message that looks like the slash command
-            return self.find_slash_command_fallback(messages, query)
-
-        except Exception as e:
-            logger.error(f"Error finding original slash command: {e}")
-            return None
-
-    def find_slash_command_fallback(self, messages, query):
-        """Fallback method to find slash command by content matching"""
-        try:
-            query_words = query.lower().split()[:5]  # First 5 words of query
-
-            for msg in reversed(messages):  # Search from newest to oldest
+            for i in range(success_index - 1, -1, -1):  # Go backwards
+                msg = messages[i]
                 text = msg.get("text", "").lower()
 
-                # Look for slash command
-                if text.startswith("/jiratest"):
-                    logger.info(f"Found slash command by prefix: {msg['ts']}")
+                # Skip bot messages
+                if msg.get("bot_id") or msg.get("user") in ["bot", None]:
+                    continue
+
+                # Look for processing message
+                if "processing" in text or "⏳" in text:
+                    logger.info(f"Found processing message at index {i}")
+                    continue  # Keep looking for user message before processing
+
+                # Look for user message that matches query
+                if any(word in text for word in query_words if len(word) > 3):
+                    logger.info(f"Found matching user trigger message: {msg['ts']}")
                     return msg["ts"]
 
-                # Look for message containing similar words to query
-                if len(query_words) >= 2:
-                    matches = sum(1 for word in query_words if word in text)
-                    if matches >= 2:  # At least 2 matching words
-                        logger.info(
-                            f"Found potential command by content match: {msg['ts']}"
-                        )
-                        return msg["ts"]
+                # Don't look too far back
+                if success_index - i > 10:
+                    break
 
-            logger.warning("Could not find slash command in fallback search")
+            logger.warning("Could not find user trigger message")
             return None
 
         except Exception as e:
-            logger.error(f"Error in fallback search: {e}")
+            logger.error(f"Error finding user trigger: {e}")
             return None

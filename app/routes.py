@@ -309,56 +309,19 @@ class BotRouter:
         """Background task to process slash command and update message"""
         try:
             logger.info(f"Processing slash command in background: {text}")
-            logger.info(f"Channel ID available: {channel_id}")
 
-            # DON'T post another processing message - we already have one!
-            # Just process the query directly
+            # Process the query directly
             user_query = UserQuery(query=text)
             result = await self.jira_service.process_query(user_query, channel_id, None)
 
-            # Post the actual result to channel and get timestamp
-            from slack_sdk import WebClient
-
-            client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
-
-            result_response = client.chat_postMessage(
-                channel=channel_id,
-                text=result.get("data", ""),
-                unfurl_links=True,
-                unfurl_media=True,
-            )
-
-            if result_response["ok"]:
-                result_timestamp = result_response["ts"]
-                logger.info(f"Posted result with timestamp: {result_timestamp}")
-
-                # Try to find user message before the result for tracking
-                user_timestamp = self.find_recent_user_message(
-                    channel_id, result_timestamp, text
-                )
-
-                if user_timestamp:
-                    logger.info(f"Found user message timestamp: {user_timestamp}")
-                    # Process again with user timestamp for tracking
-                    await self.jira_service.process_query(
-                        user_query, channel_id, user_timestamp
-                    )
-                else:
-                    logger.info("Using result timestamp as fallback for tracking")
-                    # Fallback: use result timestamp
-                    await self.jira_service.process_query(
-                        user_query, channel_id, result_timestamp
-                    )
-
-            # Replace the original "Processing..." message with empty content
+            # The success message and tracking is handled in process_query now
+            # Just replace the original "Processing..." message
             final_response = {
                 "response_type": "in_channel",
                 "replace_original": True,
-                "text": "",  # Empty to remove the processing message
+                "text": result.get("data", ""),
             }
-
             requests.post(response_url, json=final_response, timeout=10)
-            logger.info("Cleared original processing message")
 
         except Exception as e:
             logger.error(f"Error in background slash command processing: {e}")
