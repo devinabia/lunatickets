@@ -1500,34 +1500,18 @@ class Utils:
     def save_slack_tracking_data(
         self, message_id: str, channel_id: str, channel_name: str, issue_key: str
     ) -> None:
-        """Save Slack tracking data to JSON file with detailed debugging."""
+        """Save Slack tracking data to JSON file with duplicate issue key prevention."""
         try:
             file_path = "slack_message.json"
 
-            # DEBUG: Print all inputs
-            print(f"=== SAVE TRACKING DEBUG ===")
-            print(f"message_id: {message_id}")
-            print(f"channel_id: {channel_id}")
-            print(f"channel_name: {channel_name}")
-            print(f"issue_key: {issue_key}")
-
-            # DEBUG: Print file path
-            import os
-
-            abs_path = os.path.abspath(file_path)
-            print(f"Saving to: {abs_path}")
-            print(f"Current working directory: {os.getcwd()}")
-            print(f"File exists before save: {os.path.exists(file_path)}")
-
             # Create new record
             new_record = {
-                "message_id": str(message_id),  # Ensure string
-                "channel_id": str(channel_id),  # Ensure string
+                "message_id": message_id,
+                "channel_id": channel_id,
                 "channel_name": channel_name,
                 "issue_key": issue_key,
                 "timestamp": datetime.now().isoformat(),
             }
-            print(f"New record: {new_record}")
 
             # Read existing data
             existing_data = []
@@ -1535,38 +1519,31 @@ class Utils:
                 try:
                     with open(file_path, "r") as f:
                         existing_data = json.load(f)
-                    print(f"Loaded {len(existing_data)} existing records")
-                except (json.JSONDecodeError, FileNotFoundError) as e:
-                    logger.warning(f"Error reading existing file: {e}")
+                except (json.JSONDecodeError, FileNotFoundError):
                     existing_data = []
-            else:
-                print("File doesn't exist, creating new one")
 
-            # Append new record
+            # Check if issue_key already exists
+            existing_issue_keys = {item.get("issue_key") for item in existing_data}
+
+            if issue_key in existing_issue_keys:
+                logger.info(
+                    f"Issue key {issue_key} already exists in tracking data - skipping duplicate"
+                )
+                return
+
+            # Append new record only if issue_key doesn't exist
             existing_data.append(new_record)
-            print(f"Total records after append: {len(existing_data)}")
 
             # Write back to file
             with open(file_path, "w") as f:
                 json.dump(existing_data, f, indent=2)
 
-            # Verify the write
-            if os.path.exists(file_path):
-                with open(file_path, "r") as f:
-                    verification_data = json.load(f)
-                print(
-                    f"✅ File saved successfully with {len(verification_data)} records"
-                )
-                print(
-                    f"Last record: {verification_data[-1] if verification_data else 'None'}"
-                )
-            else:
-                logger.error("❌ File was not created!")
-
-            print(f"=== SAVE TRACKING DEBUG END ===")
+            logger.info(
+                f"Saved tracking data for NEW issue {issue_key} in channel {channel_name}"
+            )
 
         except Exception as e:
-            logger.error(f"❌ Error saving slack tracking data: {e}", exc_info=True)
+            logger.error(f"Error saving slack tracking data: {e}")
 
     def extract_issue_key_from_response(self, response_data: str) -> str:
         """Extract issue key from Jira response data."""

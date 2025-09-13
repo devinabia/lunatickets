@@ -412,31 +412,37 @@ Return only the grammatically corrected request:"""
     ) -> dict:
         """Process Jira query using single agent with Slack tracking."""
         try:
-            logger.info(f"=== DEBUG START ===")
             logger.info(f"Processing query: {user_query.query}")
-            print(f"Message ID (AI response): {message_id}")
+            logger.info(f"Channel ID: {channel_id}")
+            logger.info(f"Message ID: {message_id}")
 
-            # Just get raw chat history - no interpretation
+            # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
+
+            # KEEP THIS - Important query refinement functionality
             refined_query = await self.refactor_query_with_context(
                 user_query.query, chat_history_string
             )
-            # Give everything raw to the agent - let IT figure it out
+            logger.info(f"Original query: {user_query.query}")
+            logger.info(f"Refined query: {refined_query}")
+
+            # Give refined query and context to the agent
             content = f"""
-        USER QUERY: {refined_query}
+    USER QUERY: {refined_query}
 
-        CONVERSATION HISTORY: 
-        {chat_history_string}
+    ORIGINAL QUERY: {user_query.query}
 
-        INSTRUCTIONS:
-        - Analyze the user query and conversation history to understand the request
-        - Extract any mentioned assignees, issue keys, priorities, etc. from the text
-        - If this refers to previous conversations (like "assign it to X"), look at the history to understand context
-        - For creation requests without assignees, ask who to assign to
-        - Call the appropriate tool based on your analysis
-        """
+    CONVERSATION HISTORY: 
+    {chat_history_string}
 
-            # Execute with single agent - no preprocessing!
+    INSTRUCTIONS:
+    - The refined query above has been enhanced with context from the conversation history
+    - Use the refined query as your primary instruction, but refer to original and history for additional context
+    - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
+    - Call the appropriate tool based on your analysis of the refined query
+    """
+
+            # Execute with single agent using refined query
             result = self.jira_agent.invoke(
                 {"messages": [{"role": "user", "content": content}]}
             )
@@ -446,49 +452,17 @@ Return only the grammatically corrected request:"""
                 response_content = final_message.content
                 formatted_response = self.utils.format_for_slack(response_content)
 
-                logger.info(f"Formatted response: {formatted_response[:200]}...")
-
                 # Extract issue key from response for tracking
                 issue_key = self.utils.extract_issue_key_from_response(
                     formatted_response
                 )
                 logger.info(f"Extracted issue key: {issue_key}")
 
-                # NEW LOGIC: Find the original slash command message
-                original_slash_message_id = None
-                if channel_id and message_id:
-                    try:
-                        original_slash_message_id = self.find_original_slash_command(
-                            channel_id, message_id, user_query.query
-                        )
-                        logger.info(
-                            f"Found original slash command message ID: {original_slash_message_id}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error finding original slash command: {e}")
-
-                # Use original slash command message ID for tracking
-                tracking_message_id = original_slash_message_id or message_id
-
-                # DEBUG: Check all conditions
-                logger.info(f"=== TRACKING CONDITIONS CHECK ===")
-                logger.info(f"channel_id present: {bool(channel_id)}")
-                logger.info(f"issue_key present: {bool(issue_key)}")
-                logger.info(f"tracking_message_id present: {bool(tracking_message_id)}")
-                logger.info(f"formatted_response present: {bool(formatted_response)}")
-
-                # Only save tracking data for CREATION operations - check response for creation keywords
-                if (
-                    channel_id
-                    and issue_key
-                    and tracking_message_id
-                    and formatted_response
-                ):
-                    logger.info("All conditions met, checking for creation keywords...")
+                # SIMPLIFIED TRACKING - remove complex logic, just use what we have
+                if channel_id and issue_key and message_id and formatted_response:
+                    logger.info("All required data present, checking for creation...")
 
                     response_lower = formatted_response.lower()
-                    logger.info(f"Response (lowercase): {response_lower[:200]}...")
-
                     creation_keywords = [
                         "successfully created",
                         "created the jira issue",
@@ -507,31 +481,23 @@ Return only the grammatically corrected request:"""
                     ]
 
                     # Check if this is a creation response
-                    found_keywords = [
-                        keyword
-                        for keyword in creation_keywords
-                        if keyword in response_lower
-                    ]
-                    logger.info(f"Found creation keywords: {found_keywords}")
-
                     is_creation = any(
                         keyword in response_lower for keyword in creation_keywords
                     )
                     logger.info(f"Is creation: {is_creation}")
 
-                    # TEMPORARY: Force save for debugging
-                    if is_creation:  # Change this to 'if is_creation:' after debugging
+                    if is_creation:
                         try:
                             logger.info("Attempting to save tracking data...")
                             channel_name = self.utils.get_channel_name(channel_id)
                             logger.info(f"Channel name: {channel_name}")
 
+                            # Use the message_id we have (no complex finding logic)
                             self.utils.save_slack_tracking_data(
-                                message_id=tracking_message_id,  # Use original slash command message
+                                message_id=message_id,  # Just use what we received
                                 channel_id=channel_id,
                                 channel_name=channel_name,
-                                issue_key=issue_key
-                                or "DEBUG-KEY",  # Use debug key if none found
+                                issue_key=issue_key,
                             )
                             logger.info(
                                 f"✅ Successfully saved tracking data for issue {issue_key}"
@@ -541,32 +507,24 @@ Return only the grammatically corrected request:"""
                                 f"❌ Error saving tracking data: {e}", exc_info=True
                             )
                     else:
-                        logger.info(
-                            "❌ Not a creation response - no tracking data saved"
-                        )
+                        logger.info("Not a creation response - no tracking data saved")
                 else:
-                    logger.info("❌ Conditions not met for saving tracking data:")
-                    if not channel_id:
-                        logger.info("  - Missing channel_id")
-                    if not issue_key:
-                        logger.info("  - Missing issue_key")
-                    if not tracking_message_id:
-                        logger.info("  - Missing tracking_message_id")
-                    if not formatted_response:
-                        logger.info("  - Missing formatted_response")
-
-                logger.info(f"=== DEBUG END ===")
+                    logger.info("Missing required data for tracking:")
+                    logger.info(f"  channel_id: {bool(channel_id)}")
+                    logger.info(f"  issue_key: {bool(issue_key)}")
+                    logger.info(f"  message_id: {bool(message_id)}")
+                    logger.info(f"  formatted_response: {bool(formatted_response)}")
 
                 return {
                     "success": True,
                     "message": "Jira operation completed",
                     "data": formatted_response,
                     "query": user_query.query,
+                    "refined_query": refined_query,  # Include refined query in response
                     "issue_key": issue_key,
-                    "original_message_id": original_slash_message_id,  # Include for debugging
                 }
             else:
-                logger.error("❌ No response generated from Jira processing")
+                logger.error("No response generated from Jira processing")
                 return {
                     "success": False,
                     "message": "No response generated from Jira processing",
@@ -575,7 +533,7 @@ Return only the grammatically corrected request:"""
                 }
 
         except Exception as e:
-            logger.error(f"❌ Error processing query: {e}", exc_info=True)
+            logger.error(f"Error processing query: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
