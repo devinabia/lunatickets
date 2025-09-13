@@ -306,31 +306,23 @@ class BotRouter:
     async def process_slash_command_async(
         self, text: str, channel_id: str, response_url: str
     ):
-        """Background task to process slash command"""
+        """Background task to process slash command - NO MESSAGE POSTING"""
         try:
             logger.info(f"Processing slash command in background: {text}")
 
             # Process the query
             user_query = UserQuery(query=text)
-            result = await self.jira_service.process_query(user_query, channel_id, None)
+            result = await self.jira_service.process_query(
+                user_query, channel_id, "SLASH_COMMAND"
+            )
 
-            # If process_query posted a message to Slack, just clear the original "Processing..."
-            if result.get("posted_to_slack"):
-                # Clear the original processing message
-                clear_response = {
-                    "response_type": "in_channel",
-                    "replace_original": True,
-                    "text": "",  # Empty to remove
-                }
-                requests.post(response_url, json=clear_response, timeout=10)
-            else:
-                # No Slack message posted, use response_url to show result
-                final_response = {
-                    "response_type": "in_channel",
-                    "replace_original": True,
-                    "text": result.get("data", ""),
-                }
-                requests.post(response_url, json=final_response, timeout=10)
+            # ONLY update the original response via response_url - NO chat_postMessage here
+            final_response = {
+                "response_type": "in_channel",
+                "replace_original": True,
+                "text": result.get("data", ""),
+            }
+            requests.post(response_url, json=final_response, timeout=10)
 
         except Exception as e:
             logger.error(f"Error in background slash command processing: {e}")
@@ -343,7 +335,6 @@ class BotRouter:
                 requests.post(response_url, json=error_response, timeout=10)
             except Exception as send_error:
                 logger.error(f"Failed to send error response: {send_error}")
-
 
     def find_recent_user_message(
         self, channel_id: str, result_timestamp: str, original_query: str
