@@ -402,7 +402,7 @@ class Utils:
 
     def normalize_issue_type(self, project_key: str, issue_type_name: str) -> str:
         """Normalize issue type name to match Jira's expectations."""
-        default_issue_type = "Task"
+        default_issue_type = "Story"
         if not issue_type_name:
             return default_issue_type
 
@@ -855,7 +855,7 @@ class Utils:
         )
 
         if issue_type_name is None:
-            issue_type_name = "Task"
+            issue_type_name = "Story"
 
         # Use default project if not provided
         if not project_name_or_key or project_name_or_key.strip() == "":
