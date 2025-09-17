@@ -115,13 +115,6 @@ class Utils:
             )
 
             # save debug dump as JSON (not str(...))
-            try:
-                with open(
-                    "/home/adnan/work/dirty/slack-jira/abc.json", "w", encoding="utf-8"
-                ) as f:
-                    json.dump(messages, f, ensure_ascii=False, indent=2)
-            except Exception as write_err:
-                logger.warning(f"Could not write debug JSON: {write_err}")
 
             if not messages:
                 return ""
