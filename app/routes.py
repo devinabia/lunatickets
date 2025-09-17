@@ -86,6 +86,7 @@ def handle_app_mention(event, say):
                 "text": f"{answer}",
                 "unfurl_links": True,
                 "unfurl_media": True,
+                "thread_ts": message_id,
             }
         )
 

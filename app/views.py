@@ -75,6 +75,18 @@ Extract the important details:
 - What's it about? (make a clear title from their request)
 - Who should work on it?
 
+ISSUE TYPE DEFAULT RULE:
+**Always create tickets as "Story" unless the user explicitly mentions the word "bug".**
+- Only use "Bug" when user specifically says the word "bug"
+- Everything else should be "Story" by default, even if describing problems or issues
+- Examples:
+- "create ticket for stripe payment" → Story
+- "create ticket for user stripe payment is not working" → Story
+- "we are facing a bug in login" → Bug (contains word "bug")
+- "create feature for dashboard" → Story
+- "fix the broken login system" → Story (no "bug" mentioned)
+- "there's an error in payment processing" → Story (no "bug" mentioned)
+
 CRITICAL: Always generate a proper description from the user's request:
 - For bugs: "User reported [issue]. [Impact/symptoms]. Investigation needed to identify and fix [problem area]."
 - For stories: "[Feature/improvement requested]. [Purpose/goal]. Implementation needed for [specific functionality]."
