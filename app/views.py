@@ -612,6 +612,7 @@ Return only the grammatically corrected request:"""
                     "created the ticket",  # Added for multi-step
                     "ticket for you:",  # Added for multi-step
                     "assigned to",  # Added for multi-step (when assignment happens)
+                    "created the tickets"
                 ]
 
                 is_creation = any(
