@@ -78,16 +78,41 @@ class JiraService:
     - Chat contains: "We need API integration, database cleanup, and UI improvements. John can handle API, Sarah the database work"
     - Action: Create 3 tickets → API integration (assign: John), database cleanup (assign: Sarah), UI improvements (ask for assignee)
 
-    DUPLICATE DETECTION:
-    **Check chat history for already created tickets:**
-    - Compare current request against previously created tickets mentioned in chat history
-    - Look for similar summaries, descriptions, or issue types
-    - If similar ticket already exists, warn user instead of creating duplicate
+    ADVANCED DUPLICATE DETECTION SYSTEM:
+    **CRITICAL: Check for duplicates using multi-level analysis before creating ANY ticket**
 
-    Examples:
-    - Previous in chat: "Created AI-123: Fix Stripe payment issue"
-    - Current request: "create ticket for stripe payment problem" 
-    - Response: "I notice we already created a similar ticket: AI-123 for Stripe payment issues. Would you like to update that ticket instead or create a new one for a different aspect?"
+    **LEVEL 1: EXACT MATCH DETECTION**
+    - Exact issue key mentions (AI-3340, SCRUM-123, etc.)
+    - Identical summaries or descriptions
+    - Same issue type + same core problem
+
+    **LEVEL 2: SEMANTIC SIMILARITY DETECTION**
+    Use domain-specific keyword matching:
+
+    - **Payment Issues**: payment, gateway, stripe, credit card, billing, transaction, checkout, charge, pay, purchase, card, finance, merchant, processing
+    - **Authentication/Login Issues**: login, auth, authentication, signin, password, token, session, sign in, log in, access, credential, user auth  
+    - **Performance Issues**: slow, performance, speed, lag, timeout, loading, response time, sluggish, delayed, hanging, freezing, bottleneck
+    - **Database Issues**: database, db, query, sync, replication, data, schema, mysql, postgres, mongodb, sql, nosql, storage
+    - **Notification Issues**: notification, push, alert, message, email, sms, apns, notify, alert, message, ping, reminder
+
+    **LEVEL 3: CONTEXTUAL SIMILARITY DETECTION**
+    - Issues discussed in last 60 minutes = HIGH priority for duplicate checking
+    - Recent team discussions about "top 5 issues" or similar = check against those issues
+    - Match user context and issue categories
+
+    **RESPONSE STRATEGIES BY CONFIDENCE:**
+
+    **HIGH Confidence Duplicate (exact/semantic match):**
+    "I notice we already discussed this exact issue: [ISSUE-KEY]. This appears to be the same [category] problem from [time_ago]. Would you like me to show the existing ticket, update it, or assign it to someone else?"
+
+    **MEDIUM Confidence Duplicate (similar category/keywords):**  
+    "I found a similar ticket: [ISSUE-KEY]. This looks related to the [category] issue we discussed [time_ago]. Are you referring to the existing ticket or requesting a new separate one?"
+
+    **CRITICAL EXAMPLE - Payment Gateway Case:**
+    - Recent History: "Payment gateway failing for credit cards... Stripe logs show invalid address errors"
+    - New Request: "create ticket regarding Payment Gateway Issue"  
+    - Detection: HIGH confidence duplicate (payment + gateway + stripe context)
+    - Response: "I notice we discussed the payment gateway issue 30 minutes ago with Stripe validation problems. Are you referring to that same issue? I can show you the existing ticket or create a new one if this is different."
 
     Creating New Tickets
 
