@@ -51,6 +51,7 @@ class JiraService:
                 self.get_sprint_list_sync,
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
+                self.get_project_epics_sync,  # NEW TOOL
             ],
             prompt=self._get_unified_prompt(),
         )
@@ -134,6 +135,17 @@ class JiraService:
     - "create feature for dashboard" → Story
     - "fix the broken login system" → Story (no "bug" mentioned)
     - "there's an error in payment processing" → Story (no "bug" mentioned)
+
+    STORY POINTS (OPTIONAL):
+    **You can optionally ask for story points when creating Story or Task tickets:**
+    - Common values: 1, 2, 3, 5, 8, 13
+    - If user doesn't mention story points, don't ask - just create without them
+    - Example: "create story with 5 story points" → story_points=5
+
+    EPIC LINKING (OPTIONAL):
+    **You can optionally link tickets to epics:**
+    - Use get_project_epics_sync to show available epics if user wants to link
+    - Example: "link to epic AI-100" → epic_key="AI-100"
 
     CRITICAL: Always generate a proper description from the user's request:
     - For bugs: "User reported [issue]. [Impact/symptoms]. Investigation needed to identify and fix [problem area]."
@@ -227,6 +239,7 @@ class JiraService:
     create_issue_sync - When someone wants a new ticket
     - ALWAYS provide: assignee, summary, description_text, issue_type
     - Call multiple times for multiple tickets from same request
+    - Optional: story_points, epic_key
     - Example: create_issue_sync(
         assignee_email="john", 
         summary="Fix Stripe payment processing issue", 
@@ -236,11 +249,16 @@ class JiraService:
 
     update_issue_sync - When someone wants to change an existing ticket  
     - Need: ticket ID (like AI-123)
+    - Optional: story_points, epic_key
     - Example: update_issue_sync(issue_key="AI-123", assignee_email="sarah")
 
     get_project_assignable_users_sync - When you need to show who can be assigned tickets
     - Use this when asking for assignees
     - Shows a nice list of available people
+
+    get_project_epics_sync - When you need to show available epics for linking
+    - Use when user wants to link ticket to epic
+    - Example: get_project_epics_sync(project_key="AI")
 
     delete_issue_sync - When someone wants to delete a ticket
     - Need: ticket ID
@@ -298,10 +316,15 @@ class JiraService:
     Scenario 3 - Multiple Tickets:
     Chat History: "We discussed API integration, database optimization, and UI improvements. John can handle the API work, Sarah mentioned she could do database work."
     User: "create tickets for these"
-    You: Create 3 tickets:
-    1. API integration (assign: John)
-    2. Database optimization (assign: Sarah) 
-    3. UI improvements (ask for assignee)
+    You: Create 3 tickets and respond with their ticket IDs:
+    Example Response:
+    "Based on our discussion, I've created 3 separate tickets for the issues mentioned:
+    1. AI-456: API integration implementation (assigned to John)
+    2. AI-457: Database optimization and cleanup (assigned to Sarah) 
+    3. AI-458: UI improvements and enhancements (needs assignee - who should handle this?)
+    All tickets have been created with detailed descriptions. Please let me know who should be assigned to the UI improvements ticket."
+    IMPORTANT: When creating multiple tickets, always include the actual ticket IDs (like AI-456, AI-457, AI-458) and summaries in your response, not just generic descriptions. This helps users track and reference the specific tickets that were created.
+
 
     Scenario 4 - Duplicate Detection:
     Chat History: "Created AI-123: Stripe payment integration"
@@ -326,6 +349,8 @@ class JiraService:
         reporter_email: str = None,
         issue_type_name: str = None,
         sprint_name: str = None,
+        story_points: int = None,  # NEW: Optional story points
+        epic_key: str = None,  # NEW: Optional epic to link to
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
@@ -343,15 +368,17 @@ class JiraService:
             reporter_email: Who reported it (optional)
             issue_type_name: Issue type (Task/Story/Bug/Epic)
             sprint_name: Sprint name or "backlog"
+            story_points: Optional story points (1, 2, 3, 5, 8, 13, etc.)
+            epic_key: Optional epic key to link this ticket to (e.g., "AI-123")
 
         Returns:
             dict: Success with ticket details OR error if assignee missing
 
         Examples:
-            ✅ create_issue_sync(assignee_email="john", summary="Fix login bug")
+            ✅ create_issue_sync(assignee_email="john", summary="Fix login bug", story_points=5)
+            ✅ create_issue_sync(assignee_email="sarah", summary="API work", epic_key="AI-100")
             ❌ create_issue_sync(summary="Fix bug") # Will ask for assignee
         """
-        # Implementation from your existing code
         return self.utils.create_issue_implementation(
             project_name_or_key,
             summary,
@@ -361,6 +388,8 @@ class JiraService:
             reporter_email,
             issue_type_name,
             sprint_name,
+            story_points,  # NEW
+            epic_key,  # NEW
         )
 
     def update_issue_sync(
@@ -375,6 +404,8 @@ class JiraService:
         labels: str = None,
         sprint_name: str = None,
         status_name: str = None,
+        story_points: int = None,  # NEW: Optional story points
+        epic_key: str = None,  # NEW: Optional epic to link to
     ) -> dict:
         """
         Update an existing Jira ticket by issue key.
@@ -390,13 +421,15 @@ class JiraService:
             labels: Comma-separated labels
             sprint_name: Sprint name or "backlog"
             status_name: New status (In Progress/Done/To Do)
+            story_points: Story points (1, 2, 3, 5, 8, 13, etc.)
+            epic_key: Epic key to link this ticket to (e.g., "AI-123")
 
         Returns:
             dict: Updated ticket information
 
         Examples:
             ✅ update_issue_sync(issue_key="AI-123", summary="New title")
-            ✅ update_issue_sync(issue_key="PROJ-456", assignee_email="john")
+            ✅ update_issue_sync(issue_key="PROJ-456", assignee_email="john", story_points=8)
         """
         return self.utils.update_issue(
             issue_key,
@@ -410,6 +443,8 @@ class JiraService:
             labels.split(",") if labels else None,
             sprint_name,
             status_name,
+            story_points,  # NEW
+            epic_key,  # NEW
         )
 
     def get_project_assignable_users_sync(self, project_key: str = "AI") -> dict:
@@ -458,6 +493,53 @@ class JiraService:
         except Exception as e:
             logger.error(f"Error fetching project users: {e}")
             return {"success": False, "error": str(e), "users": []}
+
+    def get_project_epics_sync(self, project_key: str = "AI") -> dict:
+        """
+        Get list of epics for a project to allow users to link tickets to epics.
+        Now uses the jira Python library for reliable epic retrieval.
+
+        Args:
+            project_key: Project key like "AI", "BUN", etc. (defaults to "AI")
+
+        Returns:
+            dict: List of epics with their keys and summaries
+        """
+        try:
+            result = self.utils.get_project_epics_implementation(project_key)
+
+            # Enhanced error handling with better user guidance
+            if not result["success"]:
+                if "jira library" in result.get("error", "").lower():
+                    result["user_message"] = (
+                        f"Epic discovery requires the 'jira' Python library to be installed. "
+                        f"If you know a specific epic key (like {project_key}-100), I can still link to it directly."
+                    )
+                else:
+                    result["user_message"] = (
+                        f"Unable to fetch epics right now. If you have a specific epic key in mind, "
+                        f"please provide it and I'll link the ticket to it."
+                    )
+
+            # Add helpful guidance when no epics are found
+            elif result["success"] and not result.get("epics"):
+                result["user_message"] = (
+                    f"No epics found in {project_key}. You can create epics in Jira first, "
+                    f"or if you have an existing epic key, I can link to it directly."
+                )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in get_project_epics_sync: {e}")
+            return {
+                "success": False,
+                "project": project_key,
+                "epics": [],
+                "error": str(e),
+                "message": f"Epic search temporarily unavailable. Please provide a specific epic key if you want to link to an epic.",
+                "user_message": f"I'm having trouble accessing epics right now. If you know an epic key (like {project_key}-123), I can link to it directly.",
+            }
 
     def delete_issue_sync(self, issue_key: str) -> dict:
         """
@@ -612,7 +694,7 @@ Return only the grammatically corrected request:"""
                     "created the ticket",  # Added for multi-step
                     "ticket for you:",  # Added for multi-step
                     "assigned to",  # Added for multi-step (when assignment happens)
-                    "created the tickets"
+                    "created the tickets",
                 ]
 
                 is_creation = any(

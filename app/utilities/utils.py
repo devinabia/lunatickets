@@ -114,8 +114,6 @@ class Utils:
                 )
             )
 
-            # save debug dump as JSON (not str(...))
-
             if not messages:
                 return ""
 
@@ -593,6 +591,182 @@ class Utils:
             logger.error(f"Error updating description: {e}")
             raise
 
+    # ========================================
+    # NEW: STORY POINTS AND EPIC SUPPORT
+    # ========================================
+
+    def get_story_points_field_id(self, project_key: str) -> str:
+        """Find the story points custom field ID for the project."""
+        try:
+            # Common story points field IDs
+            common_story_fields = [
+                "customfield_10016",  # Most common
+                "customfield_10002",
+                "customfield_10004",
+                "customfield_10008",
+                "customfield_10020",
+            ]
+
+            # Try to get field mapping from create meta
+            r = self.session.get(
+                f"{self.base_url}/rest/api/3/issue/createmeta",
+                params={
+                    "projectKeys": project_key,
+                    "expand": "projects.issuetypes.fields",
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            for project in data.get("projects", []):
+                for issue_type in project.get("issuetypes", []):
+                    fields = issue_type.get("fields", {})
+                    for field_id, field_info in fields.items():
+                        field_name = field_info.get("name", "").lower()
+                        if "story" in field_name and "point" in field_name:
+                            logger.info(f"Found story points field: {field_id}")
+                            return field_id
+
+            # Fallback to most common
+            logger.info("Using default story points field: customfield_10016")
+            return "customfield_10016"
+
+        except Exception as e:
+            logger.warning(f"Error finding story points field: {e}")
+            return "customfield_10016"
+
+    def get_epic_link_field_id(self, project_key: str) -> str:
+        """Find the epic link custom field ID for the project."""
+        try:
+            # Common epic link field IDs
+            common_epic_fields = [
+                "customfield_10014",  # Most common
+                "customfield_10006",
+                "customfield_10008",
+                "customfield_10010",
+            ]
+
+            # Try to detect from create meta
+            r = self.session.get(
+                f"{self.base_url}/rest/api/3/issue/createmeta",
+                params={
+                    "projectKeys": project_key,
+                    "expand": "projects.issuetypes.fields",
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            for project in data.get("projects", []):
+                for issue_type in project.get("issuetypes", []):
+                    fields = issue_type.get("fields", {})
+                    for field_id, field_info in fields.items():
+                        field_name = field_info.get("name", "").lower()
+                        if "epic" in field_name and "link" in field_name:
+                            logger.info(f"Found epic link field: {field_id}")
+                            return field_id
+
+            # Fallback to most common
+            logger.info("Using default epic link field: customfield_10014")
+            return "customfield_10014"
+
+        except Exception as e:
+            logger.warning(f"Error finding epic link field: {e}")
+            return "customfield_10014"
+
+    def get_project_epics_implementation(self, project_key: str) -> dict:
+        """Get epics using the jira Python library for better reliability."""
+        try:
+            logger.info(
+                f"=== Fetching epics for project {project_key} using jira library ==="
+            )
+
+            # Import the jira library
+            from jira import JIRA
+
+            # Initialize the Jira client using the same credentials
+            jira_client = JIRA(
+                server=self.base_url, basic_auth=(self.email, self.token)
+            )
+
+            # Search for epics using JQL - same as your working script
+            jql_query = (
+                f"project = {project_key} AND issuetype = Epic ORDER BY created DESC"
+            )
+
+            # Search for epics (limit to 50 for performance)
+            epic_issues = jira_client.search_issues(jql_query, maxResults=50)
+
+            logger.info(f"Found {len(epic_issues)} epics in project {project_key}")
+
+            if epic_issues:
+                epics = []
+                for epic in epic_issues:
+                    epic_info = {
+                        "key": epic.key,
+                        "summary": epic.fields.summary,
+                        "status": epic.fields.status.name,
+                    }
+                    epics.append(epic_info)
+                    logger.info(f"Epic found: {epic.key} - {epic.fields.summary}")
+
+                # Format for display
+                formatted_list = []
+                for epic in epics:
+                    formatted_list.append(
+                        f"• {epic['key']}: {epic['summary']} ({epic['status']})"
+                    )
+
+                return {
+                    "success": True,
+                    "project": project_key,
+                    "epics": epics,
+                    "formatted_list": "\n".join(formatted_list),
+                    "message": f"Found {len(epics)} epics in {project_key}",
+                    "method_used": "jira_library",
+                }
+            else:
+                logger.info(f"No epics found in project {project_key}")
+                return {
+                    "success": True,
+                    "project": project_key,
+                    "epics": [],
+                    "formatted_list": f"No epics found in project {project_key}.\n\nTo create an epic, go to your Jira project and create a new issue with type 'Epic'.",
+                    "message": f"No epics found in {project_key}. You may need to create some epics first.",
+                    "method_used": "jira_library",
+                }
+
+        except ImportError as import_error:
+            logger.error(f"jira library not installed: {import_error}")
+            return {
+                "success": False,
+                "project": project_key,
+                "epics": [],
+                "error": "jira library not installed",
+                "message": f"Epic discovery requires the 'jira' Python library. Please install it with: pip install jira",
+                "formatted_list": "Epic discovery unavailable - jira library missing.",
+            }
+
+        except Exception as e:
+            logger.error(f"Error fetching epics using jira library: {e}")
+
+            # Provide helpful fallback message
+            return {
+                "success": True,  # Set to True so ticket creation can still proceed
+                "project": project_key,
+                "epics": [],
+                "error": str(e),
+                "formatted_list": f"Epic auto-discovery temporarily unavailable.\n\nYou can manually specify epic keys from your project (e.g., {project_key}-123).\n\nTo find epics, go to your Jira project → Issues and filter by Epic issue type.",
+                "message": f"Cannot automatically list epics right now. You can specify epic keys manually.",
+                "method_used": "fallback",
+            }
+
+    # ========================================
+    # SPRINT UTILITIES
+    # ========================================
+
     def _get_board_id_for_project(self, project_key: str) -> int:
         """Find a board for this project (prefer scrum)."""
         url = f"{self.base_url}/rest/agile/1.0/board"
@@ -780,15 +954,7 @@ class Utils:
             }
 
     def get_sprint_list_implementation(self, project_name_or_key: str) -> dict:
-        """
-        Get list of sprints for a project. Use this when you need sprint options.
-
-        Args:
-            project_name_or_key: Jira project key (e.g., "SCRUM", "LUNA_TICKETS")
-
-        Returns:
-            dict: Sprint list information
-        """
+        """Get list of sprints for a project."""
         try:
             project_key = self.resolve_project_key(project_name_or_key)
             sprint_list = self.get_all_sprints_for_project(project_key)
@@ -807,16 +973,7 @@ class Utils:
             }
 
     def get_project_from_issue_implementation(self, issue_key: str) -> dict:
-        """
-        Helper tool to get the project key from an issue key.
-        Use this when you need to know which project an issue belongs to.
-
-        Args:
-            issue_key: The ticket ID (e.g., "LT-23", "SCRUM-456")
-
-        Returns:
-            dict: Project information for the issue
-        """
+        """Helper tool to get the project key from an issue key."""
         try:
             issue_data = self.get_issue(issue_key, "project")
             project_key = issue_data["fields"]["project"]["key"]
@@ -831,7 +988,7 @@ class Utils:
             }
 
     # ========================================
-    # CRUD OPERATIONS (KEEP YOUR EXISTING IMPLEMENTATIONS)
+    # CRUD OPERATIONS (UPDATED WITH STORY POINTS AND EPIC)
     # ========================================
 
     def create_issue_implementation(
@@ -844,11 +1001,13 @@ class Utils:
         reporter_email: str = None,
         issue_type_name: str = None,
         sprint_name: str = None,
+        story_points: int = None,  # NEW
+        epic_key: str = None,  # NEW
         force_update_description_after_create: bool = True,
     ) -> dict:
         """Create a new Jira ticket/issue with validation."""
         logger.info(
-            f"Creating issue with context - assignee: {assignee_email}, summary: {summary}"
+            f"Creating issue with context - assignee: {assignee_email}, summary: {summary}, story_points: {story_points}, epic: {epic_key}"
         )
 
         if issue_type_name is None:
@@ -955,6 +1114,26 @@ class Utils:
                 except Exception as e:
                     logger.warning(f"Could not set reporter '{reporter_email}': {e}")
 
+            # NEW: Set story points if provided
+            if story_points and normalized_issue_type in ["Story", "Task"]:
+                try:
+                    story_points_field = self.get_story_points_field_id(project_key)
+                    if story_points_field in allowed:
+                        fields[story_points_field] = story_points
+                        logger.info(f"Setting story points to: {story_points}")
+                except Exception as e:
+                    logger.warning(f"Could not set story points '{story_points}': {e}")
+
+            # NEW: Set epic link if provided
+            if epic_key and normalized_issue_type != "Epic":
+                try:
+                    epic_link_field = self.get_epic_link_field_id(project_key)
+                    if epic_link_field in allowed:
+                        fields[epic_link_field] = epic_key
+                        logger.info(f"Linking to epic: {epic_key}")
+                except Exception as e:
+                    logger.warning(f"Could not link to epic '{epic_key}': {e}")
+
             # Add labels if supported
             if "labels" in allowed:
                 fields["labels"] = ["created-by-luna"]
@@ -1030,6 +1209,12 @@ class Utils:
                 "project": project_key,
             }
 
+            # Add story points and epic info if they were set
+            if story_points:
+                result["story_points"] = story_points
+            if epic_key:
+                result["epic_key"] = epic_key
+
             # Add assignment information if there were issues
             if assignment_info["suggestions"]:
                 result["assignment_failed"] = True
@@ -1064,6 +1249,28 @@ class Utils:
             raise RuntimeError(f"No Jira user found for '{query}'.")
         return users[0]["accountId"]
 
+    @staticmethod
+    def extract_issue_key_from_response(response_data: str) -> str:
+        """Extract issue key from Jira response data."""
+        try:
+            if not response_data:
+                return ""
+
+            # Look for patterns like AI-123, PROJ-456, etc.
+            import re
+
+            pattern = r"\b([A-Z]+[-_]\d+)\b"
+            matches = re.findall(pattern, response_data)
+
+            if matches:
+                # Return the first match (most likely the created/updated issue)
+                return matches[0]
+
+            return ""
+        except Exception as e:
+            logger.error(f"Error extracting issue key: {e}")
+            return ""
+
     def update_issue(
         self,
         issue_key: str,
@@ -1077,6 +1284,8 @@ class Utils:
         labels: list = None,
         sprint_name: str = None,
         status_name: str = None,
+        story_points: int = None,  # NEW
+        epic_key: str = None,  # NEW
     ) -> dict:
         """Update existing Jira issue with new field values including sprint movement."""
         try:
@@ -1170,6 +1379,28 @@ class Utils:
             # Update labels
             if labels is not None and "labels" in allowed:
                 fields["labels"] = labels
+
+            # NEW: Update story points
+            if story_points is not None:
+                try:
+                    story_points_field = self.get_story_points_field_id(project_key)
+                    if story_points_field in allowed:
+                        fields[story_points_field] = story_points
+                        logger.info(f"Setting story points to: {story_points}")
+                except Exception as e:
+                    logger.warning(f"Could not set story points '{story_points}': {e}")
+
+            # NEW: Update epic link
+            if epic_key is not None:
+                try:
+                    epic_link_field = self.get_epic_link_field_id(project_key)
+                    if epic_link_field in allowed:
+                        fields[epic_link_field] = epic_key if epic_key else None
+                        logger.info(
+                            f"{'Linking to epic' if epic_key else 'Removing epic link'}: {epic_key}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not update epic link '{epic_key}': {e}")
 
             if not fields and not sprint_name and not status_name:
                 return {
@@ -1388,6 +1619,10 @@ class Utils:
                 updated_fields.append("Sprint")
             if status_updated:
                 updated_fields.append("Status")
+            if story_points is not None:
+                updated_fields.append("Story Points")
+            if epic_key is not None:
+                updated_fields.append("Epic Link")
 
             # Extract dates for response
             response_due_date = updated["fields"].get("duedate")
@@ -1410,6 +1645,12 @@ class Utils:
             # Add sprint info if sprint was updated
             if sprint_updated and sprint_status:
                 result["sprint"] = sprint_status
+
+            # Add story points and epic if they were updated
+            if story_points is not None:
+                result["story_points"] = story_points
+            if epic_key is not None:
+                result["epic_key"] = epic_key if epic_key else "Removed"
 
             # Add assignment information if there were issues
             if assignment_info["suggestions"]:
@@ -1541,27 +1782,6 @@ class Utils:
 
         except Exception as e:
             logger.error(f"Error saving slack tracking data: {e}")
-
-    def extract_issue_key_from_response(self, response_data: str) -> str:
-        """Extract issue key from Jira response data."""
-        try:
-            if not response_data:
-                return ""
-
-            # Look for patterns like AI-123, PROJ-456, etc.
-            import re
-
-            pattern = r"\b([A-Z]+[-_]\d+)\b"
-            matches = re.findall(pattern, response_data)
-
-            if matches:
-                # Return the first match (most likely the created/updated issue)
-                return matches[0]
-
-            return ""
-        except Exception as e:
-            logger.error(f"Error extracting issue key: {e}")
-            return ""
 
     def postStatusMsgToSlack(issueKey: str, status_name: str):
         print("Entered in postStatusMsgToSlack")
