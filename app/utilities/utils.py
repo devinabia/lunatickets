@@ -972,6 +972,28 @@ class Utils:
                 "sprint_list": f"Could not get sprints for {project_name_or_key}. Use 'backlog'.",
             }
 
+    @staticmethod
+    def extract_issue_key_from_response(response_data: str) -> str:
+        """Extract issue key from Jira response data."""
+        try:
+            if not response_data:
+                return ""
+
+            # Look for patterns like AI-123, PROJ-456, etc.
+            import re
+
+            pattern = r"\b([A-Z]+[-_]\d+)\b"
+            matches = re.findall(pattern, response_data)
+
+            if matches:
+                # Return the first match (most likely the created/updated issue)
+                return matches[0]
+
+            return ""
+        except Exception as e:
+            logger.error(f"Error extracting issue key: {e}")
+            return ""
+
     def get_project_from_issue_implementation(self, issue_key: str) -> dict:
         """Helper tool to get the project key from an issue key."""
         try:
@@ -1001,13 +1023,15 @@ class Utils:
         reporter_email: str = None,
         issue_type_name: str = None,
         sprint_name: str = None,
-        story_points: int = None,  # NEW
-        epic_key: str = None,  # NEW
+        story_points: int = None,
+        epic_key: str = None,
+        slack_username: str = None,  # NEW: Slack username for automatic reporter detection
         force_update_description_after_create: bool = True,
     ) -> dict:
-        """Create a new Jira ticket/issue with validation."""
+        """Create a new Jira ticket/issue with validation and automatic reporter detection."""
         logger.info(
-            f"Creating issue with context - assignee: {assignee_email}, summary: {summary}, story_points: {story_points}, epic: {epic_key}"
+            f"Creating issue with context - assignee: {assignee_email}, summary: {summary}, "
+            f"story_points: {story_points}, epic: {epic_key}, slack_user: {slack_username}"
         )
 
         if issue_type_name is None:
@@ -1054,6 +1078,49 @@ class Utils:
             logger.info(
                 f"Original issue type: '{issue_type_name}' -> Normalized: '{normalized_issue_type}'"
             )
+
+            # NEW: Automatic reporter detection from Slack username
+            reporter_account_id = None
+            reporter_set_method = "admin_fallback"
+            reporter_display_name = "Admin (token owner)"
+
+            if slack_username and not reporter_email:
+                # Try to match Slack user to Jira user
+                logger.info(
+                    f"Attempting to match Slack user '{slack_username}' to Jira user..."
+                )
+                match_result = self.match_slack_user_to_jira_using_context(
+                    slack_username, project_key
+                )
+
+                if match_result["success"]:
+                    reporter_account_id = match_result["account_id"]
+                    reporter_display_name = match_result["display_name"]
+                    reporter_set_method = f"slack_match_{match_result['reason']}"
+                    logger.info(
+                        f"✅ Reporter will be set to: {reporter_display_name} (matched from Slack user '{slack_username}')"
+                    )
+                else:
+                    logger.info(
+                        f"ℹ️ Reporter matching failed: {match_result['reason']} - {match_result['message']}. "
+                        f"Will use admin as fallback"
+                    )
+            elif reporter_email:
+                # Manual reporter email provided (existing behavior)
+                try:
+                    reporter_account_id = self.get_account_id(reporter_email)
+                    reporter_set_method = "manual_email"
+                    reporter_display_name = reporter_email
+                    logger.info(f"Reporter manually set to: {reporter_email}")
+                except Exception as e:
+                    logger.warning(
+                        f"Could not set reporter '{reporter_email}': {e}. Will use admin"
+                    )
+                    reporter_account_id = None
+
+            # If no reporter set yet, it will default to admin (token owner)
+            if not reporter_account_id:
+                logger.info("Using admin (token owner) as reporter")
 
             allowed = self.get_create_fields(project_key, normalized_issue_type)
             board_info = self.get_board_info(project_key)
@@ -1106,15 +1173,20 @@ class Utils:
                 except Exception as e:
                     logger.warning(f"Could not set priority '{priority_name}': {e}")
 
-            # Set reporter
-            if reporter_email and "reporter" in allowed:
+            # NEW: Set reporter (from Slack match or manual or defaults to admin)
+            if reporter_account_id and "reporter" in allowed:
                 try:
-                    reporter_id = self.get_account_id(reporter_email)
-                    fields["reporter"] = {"id": reporter_id}
+                    fields["reporter"] = {"id": reporter_account_id}
+                    logger.info(
+                        f"✅ Reporter field set successfully via {reporter_set_method}"
+                    )
                 except Exception as e:
-                    logger.warning(f"Could not set reporter '{reporter_email}': {e}")
+                    logger.warning(
+                        f"Could not set reporter field: {e}, will default to admin"
+                    )
+                    reporter_set_method = "admin_fallback_after_error"
 
-            # NEW: Set story points if provided
+            # Set story points if provided
             if story_points and normalized_issue_type in ["Story", "Task"]:
                 try:
                     story_points_field = self.get_story_points_field_id(project_key)
@@ -1124,7 +1196,7 @@ class Utils:
                 except Exception as e:
                     logger.warning(f"Could not set story points '{story_points}': {e}")
 
-            # NEW: Set epic link if provided
+            # Set epic link if provided
             if epic_key and normalized_issue_type != "Epic":
                 try:
                     epic_link_field = self.get_epic_link_field_id(project_key)
@@ -1201,12 +1273,16 @@ class Utils:
                 "assignee": (final["fields"]["assignee"] or {}).get(
                     "displayName", "Unassigned"
                 ),
+                "reporter": (final["fields"]["reporter"] or {}).get(
+                    "displayName", "Admin"
+                ),
                 "status": (final["fields"]["status"] or {}).get("name", "To Do"),
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
                 "sprint": sprint_status,
                 "project": project_key,
+                "reporter_set_method": reporter_set_method,  # NEW: Track how reporter was set
             }
 
             # Add story points and epic info if they were set
@@ -1223,8 +1299,21 @@ class Utils:
                     f"Ticket created but could not assign to '{assignee_email}'"
                 )
 
+            # NEW: Add reporter information for transparency
+            if reporter_set_method.startswith("slack_match"):
+                result["reporter_note"] = (
+                    f"Reporter automatically set to {reporter_display_name} based on Slack user"
+                )
+            elif reporter_set_method == "manual_email":
+                result["reporter_note"] = (
+                    f"Reporter manually set to {reporter_display_name}"
+                )
+            else:
+                result["reporter_note"] = "Reporter defaulted to admin (token owner)"
+
             logger.info(
-                f"Issue {issue_key} created in project {project_key} with status: {result.get('status')} in sprint: {sprint_status}"
+                f"Issue {issue_key} created in project {project_key} with status: {result.get('status')} "
+                f"in sprint: {sprint_status}, reporter: {reporter_display_name} ({reporter_set_method})"
             )
             return result
 
@@ -1248,28 +1337,6 @@ class Utils:
         if not users:
             raise RuntimeError(f"No Jira user found for '{query}'.")
         return users[0]["accountId"]
-
-    @staticmethod
-    def extract_issue_key_from_response(response_data: str) -> str:
-        """Extract issue key from Jira response data."""
-        try:
-            if not response_data:
-                return ""
-
-            # Look for patterns like AI-123, PROJ-456, etc.
-            import re
-
-            pattern = r"\b([A-Z]+[-_]\d+)\b"
-            matches = re.findall(pattern, response_data)
-
-            if matches:
-                # Return the first match (most likely the created/updated issue)
-                return matches[0]
-
-            return ""
-        except Exception as e:
-            logger.error(f"Error extracting issue key: {e}")
-            return ""
 
     def update_issue(
         self,
@@ -1710,6 +1777,202 @@ class Utils:
                 "success": False,
                 "error": str(e),
                 "message": f"Failed to delete Jira issue {issue_key}: {str(e)}",
+            }
+
+    def match_slack_user_to_jira_using_context(
+        self, slack_username: str, project_key: str
+    ) -> dict:
+        """
+        Match Slack username to Jira user using the conversation context.
+        This leverages the main agent's intelligence instead of separate AI calls.
+        """
+        try:
+            if not slack_username or not slack_username.strip():
+                logger.info("No Slack username provided, will use admin as reporter")
+                return {
+                    "success": False,
+                    "account_id": None,
+                    "reason": "no_slack_username",
+                    "message": "No Slack username provided",
+                }
+
+            # Get all project users
+            users = self.get_project_users(project_key, max_results=100)
+
+            if not users:
+                logger.warning(
+                    f"No users found in project {project_key}, will use admin"
+                )
+                return {
+                    "success": False,
+                    "account_id": None,
+                    "reason": "no_jira_users",
+                    "message": "No Jira users found",
+                }
+
+            slack_username_clean = slack_username.strip().lower()
+
+            logger.info(
+                f"🔍 Smart matching Slack user '{slack_username}' to Jira users"
+            )
+
+            # LEVEL 1: Exact matches (fast)
+            for user in users:
+                display_name = user.get("displayName", "").lower()
+                email = user.get("emailAddress", "").lower()
+                email_prefix = email.split("@")[0] if "@" in email else ""
+
+                if (
+                    slack_username_clean == display_name
+                    or slack_username_clean == email_prefix
+                ):
+                    logger.info(
+                        f"✅ Exact match: '{slack_username}' → '{user['displayName']}'"
+                    )
+                    return {
+                        "success": True,
+                        "account_id": user["accountId"],
+                        "display_name": user["displayName"],
+                        "email": user.get("emailAddress", ""),
+                        "reason": "exact_match",
+                        "message": f"Matched to {user['displayName']}",
+                    }
+
+            # LEVEL 2: Smart fuzzy matching using simple heuristics
+            # Extract first name from Slack username
+            slack_first_name = (
+                slack_username_clean.split()[0]
+                if " " in slack_username_clean
+                else slack_username_clean
+            )
+
+            # Collect potential matches with scores
+            scored_matches = []
+            for user in users:
+                display_name = user.get("displayName", "").lower()
+                email = user.get("emailAddress", "").lower()
+                email_prefix = email.split("@")[0] if "@" in email else ""
+
+                score = 0
+                match_reasons = []
+
+                # Get Jira first name
+                jira_first_name = display_name.split()[0] if display_name else ""
+                jira_name_parts = display_name.split()
+
+                # Scoring logic
+                # First name exact match (highest priority)
+                if slack_first_name == jira_first_name:
+                    score += 100
+                    match_reasons.append("first_name_match")
+
+                # Handle abbreviations: "Muhammad Waqas" vs "M waqas"
+                if len(jira_name_parts) > 1:
+                    # Check if first part is initial
+                    if len(jira_name_parts[0]) <= 2 and jira_name_parts[0].endswith(
+                        "."
+                    ):
+                        # It's an initial like "M."
+                        if slack_first_name.startswith(jira_name_parts[0][0]):
+                            # Check if rest matches
+                            slack_last = (
+                                slack_username_clean.split()[-1]
+                                if " " in slack_username_clean
+                                else ""
+                            )
+                            jira_last = jira_name_parts[-1]
+                            if slack_last == jira_last:
+                                score += 90
+                                match_reasons.append("abbreviated_first_name")
+                    elif len(jira_name_parts[0]) == 1:
+                        # Just "M" without period
+                        if slack_first_name.startswith(jira_name_parts[0]):
+                            slack_last = (
+                                slack_username_clean.split()[-1]
+                                if " " in slack_username_clean
+                                else ""
+                            )
+                            jira_last = jira_name_parts[-1]
+                            if slack_last == jira_last:
+                                score += 90
+                                match_reasons.append("abbreviated_first_name")
+
+                # First name partial match
+                if (
+                    slack_first_name in jira_first_name
+                    or jira_first_name in slack_first_name
+                ):
+                    score += 50
+                    match_reasons.append("partial_first_name")
+
+                # Email prefix match
+                if (
+                    slack_first_name == email_prefix
+                    or email_prefix in slack_username_clean
+                ):
+                    score += 70
+                    match_reasons.append("email_match")
+
+                if score > 0:
+                    scored_matches.append(
+                        {"user": user, "score": score, "reasons": match_reasons}
+                    )
+
+            # Sort by score
+            scored_matches.sort(key=lambda x: x["score"], reverse=True)
+
+            # If we have a clear winner (significantly higher score)
+            if scored_matches:
+                best_match = scored_matches[0]
+
+                # Check if it's significantly better than second best
+                if len(scored_matches) == 1 or (
+                    len(scored_matches) > 1
+                    and best_match["score"] > scored_matches[1]["score"] + 20
+                ):
+                    matched_user = best_match["user"]
+                    logger.info(
+                        f"✅ Smart match: '{slack_username}' → '{matched_user['displayName']}' "
+                        f"(score: {best_match['score']}, reasons: {best_match['reasons']})"
+                    )
+                    return {
+                        "success": True,
+                        "account_id": matched_user["accountId"],
+                        "display_name": matched_user["displayName"],
+                        "email": matched_user.get("emailAddress", ""),
+                        "reason": "smart_match",
+                        "message": f"Matched to {matched_user['displayName']}",
+                        "match_score": best_match["score"],
+                    }
+                else:
+                    # Multiple similar matches - ambiguous
+                    logger.warning(
+                        f"⚠️ Ambiguous: Multiple matches for '{slack_username}': "
+                        f"{[m['user']['displayName'] for m in scored_matches[:3]]}"
+                    )
+                    return {
+                        "success": False,
+                        "account_id": None,
+                        "reason": "ambiguous",
+                        "message": f"Multiple possible matches for '{slack_username}'",
+                    }
+
+            # No match found
+            logger.info(f"❌ No match found for '{slack_username}', will use admin")
+            return {
+                "success": False,
+                "account_id": None,
+                "reason": "no_match",
+                "message": f"No Jira user found matching '{slack_username}'",
+            }
+
+        except Exception as e:
+            logger.error(f"Error matching Slack user '{slack_username}' to Jira: {e}")
+            return {
+                "success": False,
+                "account_id": None,
+                "reason": "error",
+                "message": f"Error during matching: {str(e)}",
             }
 
     def get_channel_name(self, channel_id: str) -> str:

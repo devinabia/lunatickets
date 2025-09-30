@@ -258,9 +258,13 @@ def looks_like_bot_intent(text: str) -> bool:
 
 # -----------------------------------------------------------------------------
 # Jira API helper (NORMALIZES Slack user refs → names before sending)
+# UPDATED: Now accepts and passes user_id for Slack username extraction
 # -----------------------------------------------------------------------------
 def call_jira_api(
-    query: str, channel_id: Optional[str] = None, message_id: Optional[str] = None
+    query: str, 
+    channel_id: Optional[str] = None, 
+    message_id: Optional[str] = None,
+    user_id: Optional[str] = None  # NEW: Slack user ID
 ) -> str:
     try:
         # Normalize refs → names (covers <@U…>, <@U…|label>, bare U…/W…)
@@ -273,6 +277,8 @@ def call_jira_api(
         # Debug for verification
         logger.info(f"RAW: {query}")
         logger.info(f"NORM: {normalized_query}")
+        if user_id:
+            logger.info(f"USER_ID: {user_id}")
 
         api_endpoint = f"{BACKEND_URL}ask-query"
         payload: Dict[str, Any] = {"query": normalized_query}
@@ -280,6 +286,8 @@ def call_jira_api(
             payload["channel_id"] = channel_id
         if message_id:
             payload["message_id"] = message_id
+        if user_id:  # NEW: Pass user_id to backend
+            payload["user_id"] = user_id
 
         resp = requests.post(
             api_endpoint,
@@ -351,12 +359,13 @@ def handle_app_mention(event, say):
       - Start/continue the thread session.
       - Convert other user mentions/IDs to names before calling Jira.
       - Show 'Processing …' placeholder, then delete it before final reply.
+      - NEW: Pass user_id for reporter assignment
     """
     try:
         logger.info(f"[app_mention] {event}")
         channel_id = event.get("channel")
         message_id = event.get("ts")
-        user_id = event.get("user")
+        user_id = event.get("user")  # IMPORTANT: This is the Slack user ID
         text = (event.get("text", "") or "").strip()
 
         if _already_handled(channel_id, message_id):
@@ -382,7 +391,8 @@ def handle_app_mention(event, say):
         # placeholder
         ph_ts = post_processing_notice(channel_id, thread_id)
 
-        answer = call_jira_api(cleaned, channel_id, message_id)
+        # NEW: Pass user_id to API
+        answer = call_jira_api(cleaned, channel_id, message_id, user_id)
 
         # remove placeholder then answer
         if ph_ts:
@@ -417,6 +427,7 @@ def handle_messages(message, say):
     Avoids:
       - bot/system messages
       - non-thread channel chatter
+    NEW: Pass user_id for reporter assignment
     """
     try:
         if _is_bot_message(message):
@@ -425,7 +436,7 @@ def handle_messages(message, say):
         channel_type = message.get("channel_type")  # "im" for DMs
         channel_id = message.get("channel")
         message_id = message.get("ts")
-        user_id = message.get("user")
+        user_id = message.get("user")  # IMPORTANT: Slack user ID
         text = (message.get("text") or "").strip()
         thread_ts = message.get("thread_ts")
 
@@ -445,7 +456,8 @@ def handle_messages(message, say):
             thread_id = thread_ts or message_id
             ph_ts = post_processing_notice(channel_id, thread_id)
 
-            answer = call_jira_api(text, channel_id, message_id)
+            # NEW: Pass user_id
+            answer = call_jira_api(text, channel_id, message_id, user_id)
 
             if ph_ts:
                 delete_message(channel_id, ph_ts)
@@ -476,7 +488,8 @@ def handle_messages(message, say):
 
             ph_ts = post_processing_notice(channel_id, thread_id)
 
-            answer = call_jira_api(cleaned, channel_id, message_id)
+            # NEW: Pass user_id
+            answer = call_jira_api(cleaned, channel_id, message_id, user_id)
 
             if ph_ts:
                 delete_message(channel_id, ph_ts)
@@ -532,7 +545,8 @@ def handle_messages(message, say):
 
                     ph_ts = post_processing_notice(channel_id, session_id)
 
-                    answer = call_jira_api(full_query, channel_id, message_id)
+                    # NEW: Pass user_id
+                    answer = call_jira_api(full_query, channel_id, message_id, user_id)
 
                     if ph_ts:
                         delete_message(channel_id, ph_ts)
@@ -568,6 +582,7 @@ def handle_create_shortcut(message, say):
             return
         channel_id = message.get("channel")
         message_id = message.get("ts")
+        user_id = message.get("user")  # NEW: Get user_id
         text = (message.get("text") or "").strip()
         thread_ts = message.get("thread_ts")
         if _already_handled(channel_id, message_id):
@@ -576,7 +591,8 @@ def handle_create_shortcut(message, say):
             thread_ts and thread_ts in ACTIVE_THREADS
         ):
             ph_ts = post_processing_notice(channel_id, thread_ts or message_id)
-            answer = call_jira_api(text, channel_id, message_id)
+            # NEW: Pass user_id
+            answer = call_jira_api(text, channel_id, message_id, user_id)
             if ph_ts:
                 delete_message(channel_id, ph_ts)
             say(
@@ -642,14 +658,28 @@ class BotRouter:
 
                 channel_id = body.get("channel_id")
                 message_id = body.get("message_id")
+                user_id = body.get("user_id")  # NEW: Extract user_id from payload
+                
+                # NEW: Convert Slack user ID to display name
+                slack_username = None
+                if user_id:
+                    try:
+                        slack_username = get_user_display_name(user_id)
+                        logger.info(f"Resolved user_id {user_id} to username: {slack_username}")
+                    except Exception as e:
+                        logger.warning(f"Failed to resolve user_id {user_id}: {e}")
+                
                 if channel_id:
                     logger.info(
-                        f"API request from channel: {channel_id}, message_id: {message_id}"
+                        f"API request from channel: {channel_id}, message_id: {message_id}, "
+                        f"user_id: {user_id}, slack_username: {slack_username}"
                     )
 
                 user_query = UserQuery(query=body["query"])
+                
+                # NEW: Pass slack_username to process_query
                 result = await self.jira_service.process_query(
-                    user_query, channel_id, message_id
+                    user_query, channel_id, message_id, slack_username
                 )
                 return result
 
@@ -659,10 +689,21 @@ class BotRouter:
                 command = form.get("command", "")
                 text = (form.get("text") or "").strip()
                 channel_id = form.get("channel_id", "")
+                user_id = form.get("user_id", "")  # NEW: Extract user_id from slash command
                 response_url = form.get("response_url", "")
 
+                # NEW: Convert Slack user ID to display name
+                slack_username = None
+                if user_id:
+                    try:
+                        slack_username = get_user_display_name(user_id)
+                        logger.info(f"Slash command from user_id {user_id} -> {slack_username}")
+                    except Exception as e:
+                        logger.warning(f"Failed to resolve slash command user_id {user_id}: {e}")
+
                 logger.info(
-                    f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}"
+                    f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}, "
+                    f"User: {user_id}, Username: {slack_username}"
                 )
 
                 if command != "/jira":
@@ -676,8 +717,9 @@ class BotRouter:
                         "text": "Please provide a request. Example: `/jira create a bug in AI project`",
                     }
 
+                # NEW: Pass slack_username to background task
                 background_tasks.add_task(
-                    self.process_slash_command_async, text, channel_id, response_url
+                    self.process_slash_command_async, text, channel_id, response_url, slack_username
                 )
                 return {"response_type": "in_channel", "text": "⏳ Processing ..."}
 
@@ -692,12 +734,14 @@ class BotRouter:
             raise HTTPException(status_code=500, detail="Internal server error")
 
     async def process_slash_command_async(
-        self, text: str, channel_id: str, response_url: str
+        self, text: str, channel_id: str, response_url: str, slack_username: Optional[str] = None
     ):
+        """NEW: Added slack_username parameter"""
         try:
             user_query = UserQuery(query=text)
+            # NEW: Pass slack_username to process_query
             result = await self.jira_service.process_query(
-                user_query, channel_id, "SLASH_COMMAND"
+                user_query, channel_id, "SLASH_COMMAND", slack_username
             )
             final_response = {
                 "response_type": "in_channel",

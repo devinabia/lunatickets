@@ -51,7 +51,8 @@ class JiraService:
                 self.get_sprint_list_sync,
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
-                self.get_project_epics_sync,  # NEW TOOL
+                self.get_project_epics_sync,
+                self.match_reporter_to_jira_sync,  # NEW: Add this
             ],
             prompt=self._get_unified_prompt(),
         )
@@ -67,10 +68,29 @@ class JiraService:
     2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
     3. Handle follow-up questions - Understand when users refer back to previous tickets
 
-    ## ADVANCED CHAT HISTORY ANALYSIS
+    AUTOMATIC REPORTER ASSIGNMENT (NEW - NEVER ASK ABOUT REPORTER)
+
+    CRITICAL: Reporter is AUTOMATICALLY handled by the system. NEVER ask users about reporter or mention reporter in your responses.
+
+    How it works:
+    - The system automatically detects the Slack user who sent the message
+    - It matches them to their Jira account and sets them as the reporter
+    - If matching fails for any reason, the system silently falls back to admin (token owner)
+    - This happens completely in the background - you should NEVER mention it to users
+
+    What you should do:
+    - ✅ Create tickets normally without worrying about reporter
+    - ✅ Focus on summary, description, assignee, and other fields
+    - ❌ NEVER ask "Who should be the reporter?"
+    - ❌ NEVER mention reporter in your responses unless explicitly asked
+    - ❌ NEVER include reporter in the fields you discuss
+
+    The reporter field is handled automatically and invisibly - treat it as if it doesn't exist from a conversation perspective.
+
+    ADVANCED CHAT HISTORY ANALYSIS
 
     MULTI-TICKET DETECTION:
-    **Analyze chat history for multiple ticket creation opportunities:**
+    Analyze chat history for multiple ticket creation opportunities:
     - If conversation history contains discussion of multiple distinct issues/tasks/features, create separate tickets for each one
     - Look for user mentions in chat and auto-assign them if they are present in Jira board users
     - Match discussed issues with mentioned users based on conversation context
@@ -80,36 +100,36 @@ class JiraService:
     - Action: Create 3 tickets → API integration (assign: John), database cleanup (assign: Sarah), UI improvements (ask for assignee)
 
     ADVANCED DUPLICATE DETECTION SYSTEM:
-    **CRITICAL: Check for duplicates using multi-level analysis before creating ANY ticket**
+    CRITICAL: Check for duplicates using multi-level analysis before creating ANY ticket
 
-    **LEVEL 1: EXACT MATCH DETECTION**
+    LEVEL 1: EXACT MATCH DETECTION
     - Exact issue key mentions (AI-3340, SCRUM-123, etc.)
     - Identical summaries or descriptions
     - Same issue type + same core problem
 
-    **LEVEL 2: SEMANTIC SIMILARITY DETECTION**
+    LEVEL 2: SEMANTIC SIMILARITY DETECTION
     Use domain-specific keyword matching:
 
-    - **Payment Issues**: payment, gateway, stripe, credit card, billing, transaction, checkout, charge, pay, purchase, card, finance, merchant, processing
-    - **Authentication/Login Issues**: login, auth, authentication, signin, password, token, session, sign in, log in, access, credential, user auth  
-    - **Performance Issues**: slow, performance, speed, lag, timeout, loading, response time, sluggish, delayed, hanging, freezing, bottleneck
-    - **Database Issues**: database, db, query, sync, replication, data, schema, mysql, postgres, mongodb, sql, nosql, storage
-    - **Notification Issues**: notification, push, alert, message, email, sms, apns, notify, alert, message, ping, reminder
+    - Payment Issues: payment, gateway, stripe, credit card, billing, transaction, checkout, charge, pay, purchase, card, finance, merchant, processing
+    - Authentication/Login Issues: login, auth, authentication, signin, password, token, session, sign in, log in, access, credential, user auth  
+    - Performance Issues: slow, performance, speed, lag, timeout, loading, response time, sluggish, delayed, hanging, freezing, bottleneck
+    - Database Issues: database, db, query, sync, replication, data, schema, mysql, postgres, mongodb, sql, nosql, storage
+    - Notification Issues: notification, push, alert, message, email, sms, apns, notify, alert, message, ping, reminder
 
-    **LEVEL 3: CONTEXTUAL SIMILARITY DETECTION**
+    LEVEL 3: CONTEXTUAL SIMILARITY DETECTION
     - Issues discussed in last 60 minutes = HIGH priority for duplicate checking
     - Recent team discussions about "top 5 issues" or similar = check against those issues
     - Match user context and issue categories
 
-    **RESPONSE STRATEGIES BY CONFIDENCE:**
+    RESPONSE STRATEGIES BY CONFIDENCE:
 
-    **HIGH Confidence Duplicate (exact/semantic match):**
+    HIGH Confidence Duplicate (exact/semantic match):
     "I notice we already discussed this exact issue: [ISSUE-KEY]. This appears to be the same [category] problem from [time_ago]. Would you like me to show the existing ticket, update it, or assign it to someone else?"
 
-    **MEDIUM Confidence Duplicate (similar category/keywords):**  
+    MEDIUM Confidence Duplicate (similar category/keywords):  
     "I found a similar ticket: [ISSUE-KEY]. This looks related to the [category] issue we discussed [time_ago]. Are you referring to the existing ticket or requesting a new separate one?"
 
-    **CRITICAL EXAMPLE - Payment Gateway Case:**
+    CRITICAL EXAMPLE - Payment Gateway Case:
     - Recent History: "Payment gateway failing for credit cards... Stripe logs show invalid address errors"
     - New Request: "create ticket regarding Payment Gateway Issue"  
     - Detection: HIGH confidence duplicate (payment + gateway + stripe context)
@@ -122,10 +142,12 @@ class JiraService:
     Extract the important details:
     - What type of work is it? (story, task, bug, epic)
     - What's it about? (make a clear title from their request)
-    - Who should work on it?
+    - Who should work on it? (assignee)
+
+    IMPORTANT: Do NOT ask about reporter - it's automatically handled
 
     ISSUE TYPE DEFAULT RULE:
-    **Always create tickets as "Story" unless the user explicitly mentions the word "bug".**
+    Always create tickets as "Story" unless the user explicitly mentions the word "bug".
     - Only use "Bug" when user specifically says the word "bug"
     - Everything else should be "Story" by default, even if describing problems or issues
     - Examples:
@@ -137,13 +159,13 @@ class JiraService:
     - "there's an error in payment processing" → Story (no "bug" mentioned)
 
     STORY POINTS (OPTIONAL):
-    **You can optionally ask for story points when creating Story or Task tickets:**
+    You can optionally ask for story points when creating Story or Task tickets:
     - Common values: 1, 2, 3, 5, 8, 13
     - If user doesn't mention story points, don't ask - just create without them
     - Example: "create story with 5 story points" → story_points=5
 
     EPIC LINKING (OPTIONAL):
-    **You can optionally link tickets to epics:**
+    You can optionally link tickets to epics:
     - Use get_project_epics_sync to show available epics if user wants to link
     - Example: "link to epic AI-100" → epic_key="AI-100"
 
@@ -163,30 +185,32 @@ class JiraService:
 
     NEVER leave description empty - always generate meaningful content from the user's request.
 
-    ## TICKET CREATION WORKFLOW
+    TICKET CREATION WORKFLOW
 
-    **STEP 1: Analyze Chat History**
+    STEP 1: Analyze Chat History
     Before creating any tickets:
     1. Check for duplicate tickets already mentioned in conversation
     2. Scan for multiple issues that need separate tickets
     3. Extract potential assignees mentioned in context
 
-    **STEP 2: Handle Duplicates**
+    STEP 2: Handle Duplicates
     If similar ticket already exists in chat history:
     - Inform user about existing ticket with issue key
     - Ask if they want to update existing or create new one
     - DO NOT create duplicate without user confirmation
 
-    **STEP 3: Handle Multiple Tickets**
+    STEP 3: Handle Multiple Tickets
     If multiple distinct issues found in context:
     - Create separate tickets for each issue
     - Auto-assign users mentioned in context if they exist in Jira
     - Ask for assignees for tickets without clear assignments
 
-    **STEP 4: Create Tickets**
+    STEP 4: Create Tickets
     If you have everything needed: Create the ticket(s) right away with proper summary AND description
 
     If you're missing the assignee: Ask who should work on it. First call get_project_assignable_users_sync to show them available people, then ask them to choose.
+
+    Remember: Reporter is automatic - never ask about it, never mention it
 
     Good examples:
     - "create story for API testing" → You ask: "Who should work on this? Here are the available people: [list users]"
@@ -240,6 +264,7 @@ class JiraService:
     - ALWAYS provide: assignee, summary, description_text, issue_type
     - Call multiple times for multiple tickets from same request
     - Optional: story_points, epic_key
+    - NOTE: reporter is automatic - don't include reporter_email parameter
     - Example: create_issue_sync(
         assignee_email="john", 
         summary="Fix Stripe payment processing issue", 
@@ -290,9 +315,10 @@ class JiraService:
     5. Make meaningful summaries AND descriptions - not generic ones
     6. Remember the conversation - understand when users refer back to previous tickets
     7. If you showed user list and they pick a name from it, create the ticket immediately - don't ask again
-    8. **Always check chat history for duplicate tickets before creating**
-    9. **Create multiple tickets when conversation history suggests multiple distinct issues**
-    10. **Auto-assign users mentioned in conversation context if they exist in Jira**
+    8. Always check chat history for duplicate tickets before creating
+    9. Create multiple tickets when conversation history suggests multiple distinct issues
+    10. Auto-assign users mentioned in conversation context if they exist in Jira
+    11. NEVER ask about reporter or mention reporter - it's automatically handled
 
     Example Conversations
 
@@ -325,7 +351,6 @@ class JiraService:
     All tickets have been created with detailed descriptions. Please let me know who should be assigned to the UI improvements ticket."
     IMPORTANT: When creating multiple tickets, always include the actual ticket IDs (like AI-456, AI-457, AI-458) and summaries in your response, not just generic descriptions. This helps users track and reference the specific tickets that were created.
 
-
     Scenario 4 - Duplicate Detection:
     Chat History: "Created AI-123: Stripe payment integration"
     User: "create ticket for stripe payments"
@@ -335,7 +360,7 @@ class JiraService:
     User: "update AI-123 priority to high"
     You: Call update_issue_sync(issue_key="AI-123", priority_name="High")
 
-    Your goal is to make Jira operations feel natural and easy for users while ensuring all tickets are properly created with meaningful summaries AND detailed descriptions, avoiding duplicates, and leveraging conversation history for intelligent multi-ticket creation.
+    Your goal is to make Jira operations feel natural and easy for users while ensuring all tickets are properly created with meaningful summaries AND detailed descriptions, avoiding duplicates, and leveraging conversation history for intelligent multi-ticket creation. Remember: reporter is automatically set based on the Slack user - never ask about it or mention it.
 
     """
 
@@ -349,14 +374,14 @@ class JiraService:
         reporter_email: str = None,
         issue_type_name: str = None,
         sprint_name: str = None,
-        story_points: int = None,  # NEW: Optional story points
-        epic_key: str = None,  # NEW: Optional epic to link to
+        story_points: int = None,
+        epic_key: str = None,
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
         Create a new Jira ticket/issue.
 
-        🔴 **ASSIGNEE IS MANDATORY** 🔴
+        🔴 ASSIGNEE IS MANDATORY 🔴
         This function requires an assignee. If no assignee is provided, you must ask the user.
 
         Args:
@@ -379,6 +404,9 @@ class JiraService:
             ✅ create_issue_sync(assignee_email="sarah", summary="API work", epic_key="AI-100")
             ❌ create_issue_sync(summary="Fix bug") # Will ask for assignee
         """
+        # CRITICAL FIX: Get the slack username from the instance variable
+        slack_username = getattr(self, "current_slack_username", None)
+
         return self.utils.create_issue_implementation(
             project_name_or_key,
             summary,
@@ -388,8 +416,27 @@ class JiraService:
             reporter_email,
             issue_type_name,
             sprint_name,
-            story_points,  # NEW
-            epic_key,  # NEW
+            story_points,
+            epic_key,
+            slack_username,  # FIXED: Now passing slack_username
+        )
+
+    def match_reporter_to_jira_sync(
+        self, slack_username: str, project_key: str = "AI"
+    ) -> dict:
+        """
+        INTERNAL TOOL: Match Slack username to Jira user intelligently.
+        This tool is called automatically by the system - you should never call it directly.
+
+        Args:
+            slack_username: Slack display name
+            project_key: Jira project key
+
+        Returns:
+            dict: Matched user info or error
+        """
+        return self.utils.match_slack_user_to_jira_using_context(
+            slack_username, project_key
         )
 
     def update_issue_sync(
@@ -625,14 +672,18 @@ Return only the grammatically corrected request:"""
             return original_query
 
     async def process_query(
-        self, user_query: UserQuery, channel_id: str = None, message_id: str = None
+        self,
+        user_query: UserQuery,
+        channel_id: str = None,
+        message_id: str = None,
+        slack_username: str = None,
     ) -> dict:
         """Process Jira query using single agent with Slack tracking."""
         try:
             logger.info(f"Processing query: {user_query.query}")
             logger.info(f"Channel ID: {channel_id}")
             logger.info(f"Message ID: {message_id}")
-
+            self.current_slack_username = slack_username
             # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
 
@@ -663,6 +714,8 @@ Return only the grammatically corrected request:"""
             result = self.jira_agent.invoke(
                 {"messages": [{"role": "user", "content": content}]}
             )
+
+            self.current_slack_username = None
 
             if result and "messages" in result and len(result["messages"]) > 0:
                 final_message = result["messages"][-1]
