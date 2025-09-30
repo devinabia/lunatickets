@@ -68,10 +68,6 @@ class JiraService:
     2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
     3. Handle follow-up questions - Understand when users refer back to previous tickets
 
-    **The reporter field is handled automatically by the system. You should NEVER ask about it or mention it.**
-    - When creating tickets, the system automatically sets the reporter based on who sent the Slack message
-    - You don't need to worry about this field at all - just focus on assignee, summary, and description
-    - NEVER ask "Who should be the reporter?" - only ask "Who should work on this?" (for assignee)
     
 
     AUTOMATIC REPORTER ASSIGNMENT (NEW - NEVER ASK ABOUT REPORTER)
