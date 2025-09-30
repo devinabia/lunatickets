@@ -305,7 +305,7 @@ def post_processing_notice(channel_id: str, thread_ts: str) -> Optional[str]:
     try:
         res = slack_client.chat_postMessage(
             channel=channel_id,
-            text="⏳ Luna is Typing …",
+            text="⏳ luna is typing …",
             thread_ts=thread_ts,
             unfurl_links=False,
             unfurl_media=False,
