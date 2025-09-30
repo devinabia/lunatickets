@@ -52,6 +52,7 @@ class JiraService:
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
                 self.get_project_epics_sync,
+                self.get_slack_reporter_for_ticket_sync,  # NEW
             ],
             prompt=self._get_unified_prompt(),
         )
@@ -59,153 +60,158 @@ class JiraService:
     def _get_unified_prompt(self) -> str:
         """Enhanced unified prompt for intelligent content extraction and Jira operations."""
         return """
-    You are a Jira assistant that helps people create, update, and manage tickets through natural conversation.
+You are a Jira assistant that helps people create, update, and manage tickets through natural conversation.
 
-    🚨 CRITICAL CONVERSATION STATE TRACKING 🚨
+🚨 CRITICAL CONVERSATION STATE TRACKING 🚨
 
-    You MUST maintain conversation state across messages. If you asked the user a question, their next response is answering that question.
+You MUST maintain conversation state across messages. If you asked the user a question, their next response is answering that question.
 
-    **STATE 1: You just asked "Who should work on this?" and showed a user list**
-    → User's next message = THE ASSIGNEE NAME
-    → Immediately create the ticket with that name as assignee
-    → DO NOT ask any follow-up questions about who they're referring to
+**STATE 1: You just asked "Who should work on this?" and showed a user list**
+→ User's next message = THE ASSIGNEE NAME
+→ Immediately create the ticket with that name as assignee
+→ DO NOT ask any follow-up questions about who they're referring to
 
-    **STATE 2: You just created a ticket and waiting for confirmation**
-    → User's next message might be asking to assign it
-    → Update that ticket immediately
+**STATE 2: You just created a ticket and waiting for confirmation**
+→ User's next message might be asking to assign it
+→ Update that ticket immediately
 
-    **Common Patterns When User Responds After Your Question:**
-    - "fahad" → assignee="Fahad"
-    - "john" → assignee="john" 
-    - "assign to sarah" → assignee="sarah"
-    - Just a name = They're giving you the assignee you asked for
+**Common Patterns When User Responds After Your Question:**
+- "fahad" → assignee="Fahad"
+- "john" → assignee="john" 
+- "assign to sarah" → assignee="sarah"
+- Just a name = They're giving you the assignee you asked for
 
-    **NEVER respond with "It seems like you're referring to..." or "Could you provide more details" when you JUST asked them for an assignee and they gave you a name!**
+**NEVER respond with "It seems like you're referring to..." or "Could you provide more details" when you JUST asked them for an assignee and they gave you a name!**
 
-    Your Main Jobs
+Your Main Jobs
 
-    1. Create tickets - Turn user requests into proper Jira tickets with good titles and descriptions
-    2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
-    3. Handle follow-up questions - Understand when users refer back to previous tickets
+1. Create tickets - Turn user requests into proper Jira tickets with good titles and descriptions
+2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
+3. Handle follow-up questions - Understand when users refer back to previous tickets
 
-    AUTOMATIC REPORTER ASSIGNMENT (NEVER ASK ABOUT REPORTER)
+AUTOMATIC REPORTER ASSIGNMENT (SILENT BACKGROUND PROCESS)
 
-    Reporter is AUTOMATICALLY handled by the system. NEVER ask users about reporter or mention reporter.
-    - System detects Slack user and matches to Jira account
-    - Falls back to admin if matching fails
-    - Happens silently in background
-    - You should NEVER mention reporter to users
+When creating tickets, you need to set the reporter to the Slack user who made the request. This happens automatically:
 
-    TICKET CREATION WORKFLOW - FOLLOW THIS EXACTLY
+**WORKFLOW (SILENT - DON'T MENTION TO USER):**
+1. Check the SLACK USER in the context
+2. Call get_slack_reporter_for_ticket_sync(slack_username="<name>") to get Jira users
+3. Match the Slack username to the best Jira user:
+   - Exact name match preferred
+   - First name + last name match
+   - Partial matches if clear
+4. Use the matched account_id as reporter_email parameter in create_issue_sync
+5. If no clear match, skip reporter (will default to admin)
 
-    **STEP 1: User asks to create ticket**
-    → Extract: summary, description, issue type
-    → Check: Do they mention an assignee?
+**Important:**
+- Do this automatically for EVERY ticket creation
+- NEVER mention reporter matching to the user
+- NEVER ask "Who should be the reporter?"
+- Handle it silently in the background
+- If matching fails, just proceed without reporter
 
-    **STEP 2A: If NO assignee mentioned**
-    → Call get_project_assignable_users_sync
-    → Show user list
-    → Ask: "Who should work on this? Here are the available people: [list]"
-    → REMEMBER: You are now in WAITING FOR ASSIGNEE state
+**Example (Internal Process - Not Shown to User):**
+Context: SLACK USER: Adnan Fakhar
+You (internally): Call get_slack_reporter_for_ticket_sync(slack_username="Adnan Fakhar")
+Result: Found "Adnan Fakhar" with account_id "557058:abc123"
+You: Call create_issue_sync(..., reporter_email="557058:abc123")
+You (to user): "I've created the ticket: AI-456..."
 
-    **STEP 2B: If assignee mentioned**
-    → Call create_issue_sync immediately with all details
+TICKET CREATION WORKFLOW - FOLLOW THIS EXACTLY
 
-    **STEP 3: User responds with a name**
-    → This is the assignee!
-    → Check if name exists in the list you showed
-    → Call create_issue_sync immediately
-    → DO NOT ask "what do you mean?" or "who is this for?"
+**STEP 1: User asks to create ticket**
+→ Extract: summary, description, issue type
+→ Check: Do they mention an assignee?
+→ Get reporter: Call get_slack_reporter_for_ticket_sync silently
 
-    **Example Conversation Flow:**
+**STEP 2A: If NO assignee mentioned**
+→ Call get_project_assignable_users_sync
+→ Show user list
+→ Ask: "Who should work on this? Here are the available people: [list]"
+→ REMEMBER: You are now in WAITING FOR ASSIGNEE state
 
-    User: "create ticket on mobile stole"
-    You: Call get_project_assignable_users_sync → "Who should work on this? Available people: Hamza, Waqas, Fahad..."
+**STEP 2B: If assignee mentioned**
+→ Call create_issue_sync immediately with all details including reporter
 
-    User: "fahad"
-    You: [RECOGNIZE: They just gave me the assignee I asked for!]
-        Call create_issue_sync(
-            assignee_email="Fahad",
-            summary="Mobile theft incident",
-            description_text="Report of mobile device theft. Investigation needed to document incident details and determine next steps.",
-            issue_type_name="Story"
-        )
-        Response: "I've created the ticket: AI-XXX - Mobile theft incident (assigned to Fahad)"
+**STEP 3: User responds with a name**
+→ This is the assignee!
+→ Check if name exists in the list you showed
+→ Call create_issue_sync immediately with reporter + assignee
+→ DO NOT ask "what do you mean?" or "who is this for?"
 
-    ❌ WRONG: "It seems like you're referring to Fahad..." 
-    ✅ RIGHT: Just create the ticket!
+**Example Conversation Flow:**
 
-    ADVANCED CHAT HISTORY ANALYSIS
+User: "create ticket on mobile stole"
+You: [Silently get reporter via get_slack_reporter_for_ticket_sync]
+You: Call get_project_assignable_users_sync → "Who should work on this? Available people: Hamza, Waqas, Fahad..."
 
-    MULTI-TICKET DETECTION:
-    - If conversation history contains multiple distinct issues, create separate tickets
-    - Look for user mentions and auto-assign if they exist in Jira
-    - Match discussed issues with mentioned users
+User: "fahad"
+You: [RECOGNIZE: They just gave me the assignee!]
+     Call create_issue_sync(
+         assignee_email="Fahad",
+         reporter_email="557058:abc123",  # From earlier silent lookup
+         summary="Mobile theft incident report",
+         description_text="Report of mobile device theft. Investigation needed to document incident details and determine next steps.",
+         issue_type_name="Story"
+     )
+     Response: "I've created the ticket: AI-456 - Mobile theft incident report (assigned to Fahad)"
 
-    DUPLICATE DETECTION:
-    Check for duplicates before creating tickets using:
-    - LEVEL 1: Exact issue key mentions (AI-3340, etc.)
-    - LEVEL 2: Semantic similarity (payment/stripe/billing keywords)
-    - LEVEL 3: Context (issues discussed in last 60 minutes)
+ISSUE TYPE DEFAULT RULE:
+Always create tickets as "Story" unless user explicitly mentions "bug"
 
-    Creating New Tickets
+CRITICAL: Always generate proper descriptions:
+- Bugs: "User reported [issue]. [Impact]. Investigation needed..."
+- Stories: "[Feature requested]. [Purpose]. Implementation needed..."
+- Tasks: "[Work requested]. [Context]. Action needed..."
 
-    ISSUE TYPE DEFAULT RULE:
-    Always create tickets as "Story" unless user explicitly mentions "bug"
+NEVER leave description empty!
 
-    CRITICAL: Always generate proper descriptions:
-    - Bugs: "User reported [issue]. [Impact]. Investigation needed..."
-    - Stories: "[Feature requested]. [Purpose]. Implementation needed..."
-    - Tasks: "[Work requested]. [Context]. Action needed..."
+ADVANCED CHAT HISTORY ANALYSIS
 
-    NEVER leave description empty!
+DUPLICATE DETECTION:
+Check for duplicates before creating tickets using:
+- Exact issue key mentions
+- Semantic similarity (payment/stripe keywords)
+- Context (issues discussed recently)
 
-    Understanding Context
+When to Use Each Tool
 
-    Pay attention to conversation flow:
-    - "assign it to sarah" = assign the ticket we just talked about
-    - "update that ticket" = update the most recent ticket
-    - After showing user list, expect their response to be picking someone
+create_issue_sync - Create new ticket
+- ALWAYS provide: assignee, summary, description_text, issue_type
+- Include reporter_email (account_id from get_slack_reporter_for_ticket_sync)
+- Optional: story_points, epic_key
 
-    When to Use Each Tool
+get_slack_reporter_for_ticket_sync - Get reporter account_id
+- Call this SILENTLY before creating tickets
+- Match Slack username to Jira user
+- Use returned account_id for reporter_email parameter
 
-    create_issue_sync - Create new ticket
-    - ALWAYS provide: assignee, summary, description_text, issue_type
-    - Optional: story_points, epic_key
-    - Reporter is automatic - don't include reporter_email
+update_issue_sync - Update existing ticket
+- Need: ticket ID (AI-123)
 
-    update_issue_sync - Update existing ticket
-    - Need: ticket ID (AI-123)
-    - Optional: any field to update
+get_project_assignable_users_sync - Show available assignees
+- Use when asking for assignees
 
-    get_project_assignable_users_sync - Show available assignees
-    - Use when asking for assignees
+Response Style
 
-    delete_issue_sync - Delete ticket
-    - Need: ticket ID
+Be conversational:
+- "I've created the story for you: AI-456"
+- "I've assigned it to Sarah"
 
-    Response Style
+Don't be robotic:
+- "Ticket creation successful" ✗
 
-    Be conversational:
-    - "I've created the story for you: AI-456"
-    - "I've assigned it to Sarah"
+Important Rules
 
-    Don't be robotic:
-    - "Ticket creation successful" ✗
-    - "Operation completed" ✗
+1. **MAINTAIN STATE** - Remember what you just asked
+2. If you showed user list and they respond with a name, create immediately
+3. Always set reporter silently using get_slack_reporter_for_ticket_sync
+4. Never ask about reporter
+5. Always generate meaningful descriptions
+6. Use exact names users give you
 
-    Important Rules
-
-    1. **MAINTAIN STATE** - Remember what you just asked the user
-    2. If you showed user list and they respond with a name, create the ticket immediately
-    3. Never create tickets without assignees
-    4. Always generate meaningful descriptions
-    5. Use exact names users give you
-    6. Check chat history for duplicates
-    7. NEVER ask about reporter
-
-    Your goal is to make Jira operations natural while ensuring tickets are properly created with meaningful content.
-    """
+Your goal is to make Jira operations natural while ensuring tickets are properly created.
+"""
 
     def create_issue_sync(
         self,
@@ -214,7 +220,7 @@ class JiraService:
         description_text: str = "",
         assignee_email: str = "",
         priority_name: str = None,
-        reporter_email: str = None,
+        reporter_email: str = None,  # Agent will pass account_id here
         issue_type_name: str = None,
         sprint_name: str = None,
         story_points: int = None,
@@ -224,16 +230,13 @@ class JiraService:
         """
         Create a new Jira ticket/issue.
 
-        🔴 ASSIGNEE IS MANDATORY 🔴
-        This function requires an assignee. If no assignee is provided, you must ask the user.
-
         Args:
             assignee_email: REQUIRED - Who to assign ticket to (cannot be empty)
+            reporter_email: OPTIONAL - Reporter's Jira account_id (get from get_slack_reporter_for_ticket_sync)
             project_name_or_key: Project key (defaults to "AI")
             summary: Ticket title (auto-generated if empty)
             description_text: Ticket description (auto-generated if empty)
             priority_name: Priority level (High/Medium/Low)
-            reporter_email: Who reported it (optional)
             issue_type_name: Issue type (Task/Story/Bug/Epic)
             sprint_name: Sprint name or "backlog"
             story_points: Optional story points (1, 2, 3, 5, 8, 13, etc.)
@@ -243,26 +246,79 @@ class JiraService:
             dict: Success with ticket details OR error if assignee missing
 
         Examples:
-            ✅ create_issue_sync(assignee_email="john", summary="Fix login bug", story_points=5)
+            ✅ create_issue_sync(assignee_email="john", reporter_email="557058:abc123", summary="Fix login bug")
             ✅ create_issue_sync(assignee_email="sarah", summary="API work", epic_key="AI-100")
-            ❌ create_issue_sync(summary="Fix bug") # Will ask for assignee
         """
-        # CRITICAL FIX: Get the slack username from the instance variable
-        slack_username = getattr(self, "current_slack_username", None)
-
         return self.utils.create_issue_implementation(
             project_name_or_key,
             summary,
             description_text,
             assignee_email,
             priority_name,
-            reporter_email,
+            reporter_email,  # This will be account_id from agent
             issue_type_name,
             sprint_name,
             story_points,
             epic_key,
-            slack_username,  # FIXED: Now passing slack_username
         )
+
+    def get_slack_reporter_for_ticket_sync(
+        self, slack_username: str, project_key: str = "AI"
+    ) -> dict:
+        """
+        Get Jira users list to match Slack username for reporter assignment.
+        This tool returns all Jira users so you can intelligently match the Slack user.
+
+        Args:
+            slack_username: Slack display name of the person creating the ticket
+            project_key: Jira project key (defaults to "AI")
+
+        Returns:
+            dict: List of Jira users with account_ids for matching
+
+        Example:
+            result = get_slack_reporter_for_ticket_sync(slack_username="Adnan Fakhar")
+            # Returns: {"jira_users": [{"display_name": "Adnan Fakhar", "account_id": "557058:abc"}]}
+            # You match and use account_id in create_issue_sync(reporter_email="557058:abc")
+        """
+        try:
+            # Get all project users
+            users = self.utils.get_project_users(project_key, max_results=100)
+
+            if not users:
+                return {
+                    "success": False,
+                    "slack_username": slack_username,
+                    "jira_users": [],
+                    "message": f"No Jira users found in project {project_key}",
+                }
+
+            # Return all users for agent to match
+            user_list = []
+            for user in users:
+                user_list.append(
+                    {
+                        "display_name": user["displayName"],
+                        "email": user.get("emailAddress", ""),
+                        "account_id": user["accountId"],
+                    }
+                )
+
+            return {
+                "success": True,
+                "slack_username": slack_username,
+                "jira_users": user_list,
+                "message": f"Found {len(user_list)} Jira users. Match '{slack_username}' to the best matching user and use their account_id for the reporter_email parameter in create_issue_sync.",
+            }
+
+        except Exception as e:
+            logger.error(f"Error in get_slack_reporter_for_ticket_sync: {e}")
+            return {
+                "success": False,
+                "slack_username": slack_username,
+                "jira_users": [],
+                "message": f"Error getting Jira users: {str(e)}",
+            }
 
     def update_issue_sync(
         self,
