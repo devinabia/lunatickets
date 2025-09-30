@@ -52,7 +52,6 @@ class JiraService:
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
                 self.get_project_epics_sync,
-                self.match_reporter_to_jira_sync,  # NEW: Add this
             ],
             prompt=self._get_unified_prompt(),
         )
@@ -366,6 +365,7 @@ class JiraService:
 
     """
 
+
     def create_issue_sync(
         self,
         project_name_or_key: str = "",
@@ -423,23 +423,6 @@ class JiraService:
             slack_username,  # FIXED: Now passing slack_username
         )
 
-    def match_reporter_to_jira_sync(
-        self, slack_username: str, project_key: str = "AI"
-    ) -> dict:
-        """
-        INTERNAL TOOL: Match Slack username to Jira user intelligently.
-        This tool is called automatically by the system - you should never call it directly.
-
-        Args:
-            slack_username: Slack display name
-            project_key: Jira project key
-
-        Returns:
-            dict: Matched user info or error
-        """
-        return self.utils.match_slack_user_to_jira_using_context(
-            slack_username, project_key
-        )
 
     def update_issue_sync(
         self,
