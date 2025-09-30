@@ -577,19 +577,22 @@ Return only the grammatically corrected request:"""
 
             # Give refined query and context to the agent
             content = f"""
-    USER QUERY: {refined_query}
+            USER QUERY: {refined_query}
 
-    ORIGINAL QUERY: {user_query.query}
+            ORIGINAL QUERY: {user_query.query}
 
-    CONVERSATION HISTORY: 
-    {chat_history_string}
+            SLACK USER: {slack_username if slack_username else "Unknown"}  # ← ADD THIS LINE
 
-    INSTRUCTIONS:
-    - The refined query above has been enhanced with context from the conversation history
-    - Use the refined query as your primary instruction, but refer to original and history for additional context
-    - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
-    - Call the appropriate tool based on your analysis of the refined query
-    """
+            CONVERSATION HISTORY: 
+            {chat_history_string}
+
+            INSTRUCTIONS:
+            - The refined query above has been enhanced with context from the conversation history
+            - The SLACK USER is the person who sent this message - use get_slack_reporter_for_ticket_sync to match them to a Jira user for reporter assignment
+            - Use the refined query as your primary instruction, but refer to original and history for additional context
+            - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
+            - Call the appropriate tool based on your analysis of the refined query
+            """
 
             # Execute with single agent using refined query
             result = self.jira_agent.invoke(
