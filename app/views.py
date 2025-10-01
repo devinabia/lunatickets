@@ -558,6 +558,7 @@ Return only the grammatically corrected request:"""
             logger.info(f"Channel ID: {channel_id}")
             logger.info(f"Message ID: {message_id}")
             self.current_slack_username = slack_username
+            print("User Name: ", slack_username)
             # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id)
 
