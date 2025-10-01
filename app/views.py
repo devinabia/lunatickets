@@ -425,7 +425,10 @@ class JiraService:
         """
         try:
             users = self.utils.get_project_users(project_key, max_results=100)
-
+            print(
+                f"🔧 TOOL CALLED: get_slack_reporter_for_ticket_sync with slack_username='{slack_username}'"
+            )
+            print(users)
             if not users:
                 return {
                     "success": False,
