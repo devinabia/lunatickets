@@ -52,6 +52,7 @@ class JiraService:
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
                 self.get_project_epics_sync,
+                self.get_slack_reporter_for_ticket_sync,  # ← ADD THIS BACK
             ],
             prompt=self._get_unified_prompt(),
         )
@@ -88,13 +89,19 @@ class JiraService:
     2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
     3. Handle follow-up questions - Understand when users refer back to previous tickets
 
-    AUTOMATIC REPORTER ASSIGNMENT (NEVER ASK ABOUT REPORTER)
+    AUTOMATIC REPORTER ASSIGNMENT (SILENT)
 
-    Reporter is AUTOMATICALLY handled by the system. NEVER ask users about reporter or mention reporter.
-    - System detects Slack user and matches to Jira account
-    - Falls back to admin if matching fails
-    - Happens silently in background
-    - You should NEVER mention reporter to users
+    When creating tickets, silently match the Slack user to a Jira reporter:
+    1. Call get_slack_reporter_for_ticket_sync(slack_username="<name from context>")
+    2. Match the Slack username to best Jira user
+    3. Use their account_id as reporter_email in create_issue_sync
+    4. NEVER mention this to the user
+
+    Example (Internal):
+    Context: SLACK USER: Fahad Ahmed
+    You: Call get_slack_reporter_for_ticket_sync(slack_username="Fahad Ahmed")
+    Response: Found "Fahad" with account_id "557058:abc123"
+    You: Call create_issue_sync(..., reporter_email="557058:abc123")
 
     TICKET CREATION WORKFLOW - FOLLOW THIS EXACTLY
 
@@ -413,6 +420,48 @@ class JiraService:
                 "user_message": f"I'm having trouble accessing epics right now. If you know an epic key (like {project_key}-123), I can link to it directly.",
             }
 
+    def get_slack_reporter_for_ticket_sync(
+        self, slack_username: str, project_key: str = "AI"
+    ) -> dict:
+        """
+        Get Jira users list to match Slack username for reporter assignment.
+        """
+        try:
+            users = self.utils.get_project_users(project_key, max_results=100)
+
+            if not users:
+                return {
+                    "success": False,
+                    "slack_username": slack_username,
+                    "jira_users": [],
+                    "message": f"No Jira users found in project {project_key}",
+                }
+
+            user_list = []
+            for user in users:
+                user_list.append(
+                    {
+                        "display_name": user["displayName"],
+                        "email": user.get("emailAddress", ""),
+                        "account_id": user["accountId"],
+                    }
+                )
+
+            return {
+                "success": True,
+                "slack_username": slack_username,
+                "jira_users": user_list,
+                "message": f"Match '{slack_username}' to the best user and use their account_id for reporter_email in create_issue_sync.",
+            }
+        except Exception as e:
+            logger.error(f"Error in get_slack_reporter_for_ticket_sync: {e}")
+            return {
+                "success": False,
+                "slack_username": slack_username,
+                "jira_users": [],
+                "message": f"Error: {str(e)}",
+            }
+
     def delete_issue_sync(self, issue_key: str) -> dict:
         """
         Delete a Jira ticket permanently.
@@ -521,19 +570,22 @@ Return only the grammatically corrected request:"""
 
             # Give refined query and context to the agent
             content = f"""
-    USER QUERY: {refined_query}
+        USER QUERY: {refined_query}
 
-    ORIGINAL QUERY: {user_query.query}
+        ORIGINAL QUERY: {user_query.query}
 
-    CONVERSATION HISTORY: 
-    {chat_history_string}
+        SLACK USER: {slack_username if slack_username else "Unknown"}
 
-    INSTRUCTIONS:
-    - The refined query above has been enhanced with context from the conversation history
-    - Use the refined query as your primary instruction, but refer to original and history for additional context
-    - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
-    - Call the appropriate tool based on your analysis of the refined query
-    """
+        CONVERSATION HISTORY: 
+        {chat_history_string}
+
+        INSTRUCTIONS:
+        - The SLACK USER is who created this request
+        - For ticket creation, call get_slack_reporter_for_ticket_sync silently to match them to Jira
+        - Use the refined query as your primary instruction
+        - Extract any mentioned assignees, issue keys, priorities, etc.
+        - Call the appropriate tool based on your analysis
+        """
 
             # Execute with single agent using refined query
             result = self.jira_agent.invoke(

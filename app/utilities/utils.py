@@ -1020,18 +1020,17 @@ class Utils:
         description_text: str = "",
         assignee_email: str = "",
         priority_name: str = None,
-        reporter_email: str = None,
+        reporter_email: str = None,  # Agent passes account_id here
         issue_type_name: str = None,
         sprint_name: str = None,
         story_points: int = None,
         epic_key: str = None,
-        slack_username: str = None,  # NEW: Slack username for automatic reporter detection
         force_update_description_after_create: bool = True,
     ) -> dict:
-        """Create a new Jira ticket/issue with validation and automatic reporter detection."""
+        """Create a new Jira ticket/issue with validation."""
         logger.info(
-            f"Creating issue with context - assignee: {assignee_email}, summary: {summary}, "
-            f"story_points: {story_points}, epic: {epic_key}, slack_user: {slack_username}"
+            f"Creating issue - assignee: {assignee_email}, summary: {summary}, "
+            f"story_points: {story_points}, epic: {epic_key}, reporter: {reporter_email}"
         )
 
         if issue_type_name is None:
@@ -1078,49 +1077,6 @@ class Utils:
             logger.info(
                 f"Original issue type: '{issue_type_name}' -> Normalized: '{normalized_issue_type}'"
             )
-
-            # NEW: Automatic reporter detection from Slack username
-            reporter_account_id = None
-            reporter_set_method = "admin_fallback"
-            reporter_display_name = "Admin (token owner)"
-
-            if slack_username and not reporter_email:
-                # Try to match Slack user to Jira user
-                logger.info(
-                    f"Attempting to match Slack user '{slack_username}' to Jira user..."
-                )
-                match_result = self.match_slack_user_to_jira_using_context(
-                    slack_username, project_key
-                )
-
-                if match_result["success"]:
-                    reporter_account_id = match_result["account_id"]
-                    reporter_display_name = match_result["display_name"]
-                    reporter_set_method = f"slack_match_{match_result['reason']}"
-                    logger.info(
-                        f"✅ Reporter will be set to: {reporter_display_name} (matched from Slack user '{slack_username}')"
-                    )
-                else:
-                    logger.info(
-                        f"ℹ️ Reporter matching failed: {match_result['reason']} - {match_result['message']}. "
-                        f"Will use admin as fallback"
-                    )
-            elif reporter_email:
-                # Manual reporter email provided (existing behavior)
-                try:
-                    reporter_account_id = self.get_account_id(reporter_email)
-                    reporter_set_method = "manual_email"
-                    reporter_display_name = reporter_email
-                    logger.info(f"Reporter manually set to: {reporter_email}")
-                except Exception as e:
-                    logger.warning(
-                        f"Could not set reporter '{reporter_email}': {e}. Will use admin"
-                    )
-                    reporter_account_id = None
-
-            # If no reporter set yet, it will default to admin (token owner)
-            if not reporter_account_id:
-                logger.info("Using admin (token owner) as reporter")
 
             allowed = self.get_create_fields(project_key, normalized_issue_type)
             board_info = self.get_board_info(project_key)
@@ -1173,18 +1129,21 @@ class Utils:
                 except Exception as e:
                     logger.warning(f"Could not set priority '{priority_name}': {e}")
 
-            # NEW: Set reporter (from Slack match or manual or defaults to admin)
-            if reporter_account_id and "reporter" in allowed:
+            # SIMPLIFIED REPORTER HANDLING - Agent provides account_id
+            if reporter_email and "reporter" in allowed:
                 try:
-                    fields["reporter"] = {"id": reporter_account_id}
-                    logger.info(
-                        f"✅ Reporter field set successfully via {reporter_set_method}"
-                    )
+                    # Accept account_id format directly (from agent)
+                    if ":" in reporter_email:  # It's an account_id like "557058:abc123"
+                        fields["reporter"] = {"id": reporter_email}
+                        logger.info(f"✅ Reporter set using account_id: {reporter_email}")
+                    else:  # It's an email (fallback)
+                        reporter_id = self.get_account_id(reporter_email)
+                        fields["reporter"] = {"id": reporter_id}
+                        logger.info(f"✅ Reporter set using email: {reporter_email}")
                 except Exception as e:
-                    logger.warning(
-                        f"Could not set reporter field: {e}, will default to admin"
-                    )
-                    reporter_set_method = "admin_fallback_after_error"
+                    logger.warning(f"Could not set reporter '{reporter_email}': {e}")
+            else:
+                logger.info("No reporter provided by agent - will use Jira default (admin)")
 
             # Set story points if provided
             if story_points and normalized_issue_type in ["Story", "Task"]:
@@ -1273,16 +1232,12 @@ class Utils:
                 "assignee": (final["fields"]["assignee"] or {}).get(
                     "displayName", "Unassigned"
                 ),
-                "reporter": (final["fields"]["reporter"] or {}).get(
-                    "displayName", "Admin"
-                ),
                 "status": (final["fields"]["status"] or {}).get("name", "To Do"),
                 "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
                 "sprint": sprint_status,
                 "project": project_key,
-                "reporter_set_method": reporter_set_method,  # NEW: Track how reporter was set
             }
 
             # Add story points and epic info if they were set
@@ -1299,21 +1254,8 @@ class Utils:
                     f"Ticket created but could not assign to '{assignee_email}'"
                 )
 
-            # NEW: Add reporter information for transparency
-            if reporter_set_method.startswith("slack_match"):
-                result["reporter_note"] = (
-                    f"Reporter automatically set to {reporter_display_name} based on Slack user"
-                )
-            elif reporter_set_method == "manual_email":
-                result["reporter_note"] = (
-                    f"Reporter manually set to {reporter_display_name}"
-                )
-            else:
-                result["reporter_note"] = "Reporter defaulted to admin (token owner)"
-
             logger.info(
-                f"Issue {issue_key} created in project {project_key} with status: {result.get('status')} "
-                f"in sprint: {sprint_status}, reporter: {reporter_display_name} ({reporter_set_method})"
+                f"Issue {issue_key} created in project {project_key} with status: {result.get('status')} in sprint: {sprint_status}"
             )
             return result
 
@@ -1778,6 +1720,7 @@ class Utils:
                 "error": str(e),
                 "message": f"Failed to delete Jira issue {issue_key}: {str(e)}",
             }
+
 
     def match_slack_user_to_jira_using_context(
         self, slack_username: str, project_key: str
