@@ -255,20 +255,17 @@ class JiraService:
             ❌ create_issue_sync(summary="Fix bug") # Will ask for assignee
         """
         # CRITICAL FIX: Get the slack username from the instance variable
-        slack_username = getattr(self, "current_slack_username", None)
-
         return self.utils.create_issue_implementation(
             project_name_or_key,
             summary,
             description_text,
             assignee_email,
             priority_name,
-            reporter_email,
+            reporter_email,  # Agent will pass account_id here
             issue_type_name,
             sprint_name,
             story_points,
             epic_key,
-            slack_username,  # FIXED: Now passing slack_username
         )
 
     def update_issue_sync(
