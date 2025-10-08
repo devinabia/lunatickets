@@ -2107,42 +2107,45 @@ class Utils:
 
         return f"{description_text}{separator}{slack_section}"
 
-    def format_ticket_creation_response(
-        self,
-        issue_key: str,
-        assignee_name: str,
-        epic_key: str = None,
-        jira_url: str = None,
-        project_key: str = "AI",
-    ) -> str:
-        """
-        Format a strict, consistent ticket creation response.
+def format_ticket_creation_response(
+    self,
+    issue_key: str,
+    assignee_name: str,
+    epic_key: str = None,
+    jira_url: str = None,
+    project_key: str = "AI",
+) -> str:
+    """
+    Format a strict, consistent ticket creation response with Slack hyperlink formatting.
 
-        Args:
-            issue_key: Created ticket key (e.g., "AI-3423")
-            assignee_name: Name of assigned user
-            epic_key: Epic key if linked, None otherwise
-            jira_url: Full Jira URL to the ticket
-            project_key: Project key for epic suggestion
+    Args:
+        issue_key: Created ticket key (e.g., "AI-3423")
+        assignee_name: Name of assigned user
+        epic_key: Epic key if linked, None otherwise
+        jira_url: Full Jira URL to the ticket
+        project_key: Project key for epic suggestion
 
-        Returns:
-            str: Formatted response string
-        """
-        # Build ticket URL if not provided
-        if not jira_url:
-            jira_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
+    Returns:
+        str: Formatted response string with Slack hyperlink
+    """
+    # Build ticket URL if not provided
+    if not jira_url:
+        jira_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
 
-        # Format epic status
-        if epic_key:
-            epic_status = epic_key
-        else:
-            epic_status = "unknown - would you like a list of epics to choose from?"
+    # Format epic status
+    if epic_key:
+        epic_status = epic_key
+    else:
+        epic_status = "unknown - would you like a list of epics to choose from?"
 
-        # Build the strict response format
-        response = (
-            f"Ticket created: {jira_url}\n"
-            f"Assigned to: {assignee_name}\n"
-            f"Epic: {epic_status}"
-        )
+    # Build the strict response format with Slack hyperlink and spacing
+    # Slack hyperlink format: <URL|Display Text>
+    response = (
+        f"Ticket created: <{jira_url}|{issue_key}>\n"
+        f"\n"  # Add blank line for spacing
+        f"Assigned to: {assignee_name}\n"
+        f"\n"  # Add blank line for spacing
+        f"Epic: {epic_status}"
+    )
 
-        return response
+    return response
