@@ -987,6 +987,50 @@ class Utils:
                 "message": f"Could not find project for issue {issue_key}",
             }
 
+    def format_ticket_creation_response(
+        self,
+        issue_key: str,
+        assignee_name: str,
+        epic_key: str = None,
+        jira_url: str = None,
+        project_key: str = "AI",
+    ) -> str:
+        """
+        Format a strict, consistent ticket creation response with Slack hyperlink formatting.
+
+        Args:
+            issue_key: Created ticket key (e.g., "AI-3423")
+            assignee_name: Name of assigned user
+            epic_key: Epic key if linked, None otherwise
+            jira_url: Full Jira URL to the ticket
+            project_key: Project key for epic suggestion
+
+        Returns:
+            str: Formatted response string with Slack hyperlink
+        """
+        # Build ticket URL if not provided
+        if not jira_url:
+            jira_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
+
+        # Format epic status
+        if epic_key:
+            epic_status = epic_key
+        else:
+            epic_status = "unknown - would you like a list of epics to choose from?"
+
+        # Build the strict response format with Slack hyperlink and spacing
+        # Slack hyperlink format: <URL|Display Text>
+        response = (
+            f"\n\n"  # Add double blank line at the start
+            f"Ticket created: <{jira_url}|{issue_key}>\n\n"  # Double newline after each line
+            f"Assigned to: {assignee_name}\n\n"
+            f"Epic: {epic_status}\n\n"  # Double blank line at the end
+        )
+
+        return response
+
+
+
     # ========================================
     # CRUD OPERATIONS (UPDATED WITH STORY POINTS AND EPIC)
     # ========================================
@@ -1004,6 +1048,8 @@ class Utils:
         story_points: int = None,
         epic_key: str = None,
         slack_username: str = None,  # NEW PARAMETER
+        channel_id: str = None,  # NEW
+        message_id: str = None,  # NEW
         force_update_description_after_create: bool = True,
     ) -> dict:
         """Create a new Jira ticket/issue with validation and automatic reporter matching."""
@@ -1027,6 +1073,16 @@ class Utils:
         # Generate default description if empty
         if not description_text or description_text.strip() == "":
             description_text = "This ticket was created through the AI assistant and needs further details to be added."
+
+        if channel_id and message_id:
+            slack_link = self.build_slack_thread_link(channel_id, message_id)
+            if slack_link:
+                description_text = self.append_slack_link_to_description(
+                    description_text, slack_link
+                )
+                logger.info(f"✅ Added Slack thread link to description: {slack_link}")
+            else:
+                logger.warning("⚠️ Failed to generate Slack thread link")
 
         try:
             project_key = self.resolve_project_key(project_name_or_key)
@@ -1245,9 +1301,26 @@ class Utils:
                 issue_key, "summary,description,priority,assignee,reporter,status"
             )
 
+            # Get assignee name
+            assignee_display_name = (final["fields"]["assignee"] or {}).get(
+                "displayName", "Unassigned"
+            )
+
+            # Build the ticket URL
+            ticket_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
+
+            # 🆕 Format the strict response
+            formatted_response = self.format_ticket_creation_response(
+                issue_key=issue_key,
+                assignee_name=assignee_display_name,
+                epic_key=epic_key,  # Will be None if not provided
+                jira_url=ticket_url,
+                project_key=project_key,
+            )
+
             result = {
                 "success": True,
-                "message": f"Successfully created Jira issue {issue_key}",
+                "message": formatted_response,
                 "key": issue_key,
                 "summary": final["fields"]["summary"],
                 "description": final["fields"].get(
@@ -2010,3 +2083,72 @@ class Utils:
                 "accountId": None,
                 "message": f"Error finding reporter: {str(e)}",
             }
+
+    def build_slack_thread_link(self, channel_id: str, message_ts: str) -> str:
+        """
+        Build a Slack thread permalink from channel ID and message timestamp.
+
+        Args:
+            channel_id: Slack channel ID (e.g., C12345678)
+            message_ts: Message timestamp (e.g., 1234567890.123456)
+
+        Returns:
+            str: Slack permalink or empty string if failed
+        """
+        try:
+            if not channel_id or not message_ts:
+                logger.warning("Missing channel_id or message_ts for Slack link")
+                return ""
+
+            # Get workspace info to build the permalink
+            response = client.conversations_info(channel=channel_id)
+
+            if not response.get("ok"):
+                logger.warning(f"Failed to get channel info: {response.get('error')}")
+                return ""
+
+            # Get team/workspace info
+            team_response = client.team_info()
+            if not team_response.get("ok"):
+                logger.warning("Failed to get team info")
+                return ""
+
+            team_domain = team_response["team"]["domain"]
+
+            # Format: https://workspace.slack.com/archives/CHANNEL_ID/pMESSAGE_TS
+            # Convert message_ts format: 1234567890.123456 -> p1234567890123456
+            message_id = message_ts.replace(".", "")
+            slack_link = (
+                f"https://{team_domain}.slack.com/archives/{channel_id}/p{message_id}"
+            )
+
+            logger.info(f"Generated Slack link: {slack_link}")
+            return slack_link
+
+        except Exception as e:
+            logger.error(f"Error building Slack thread link: {e}")
+            return ""
+
+    def append_slack_link_to_description(
+        self, description_text: str, slack_link: str
+    ) -> str:
+        """
+        Append Slack thread link to the end of description text.
+
+        Args:
+            description_text: Original description text
+            slack_link: Slack thread permalink
+
+        Returns:
+            str: Description with Slack link appended
+        """
+        if not slack_link:
+            return description_text
+
+        # Add separator and link at the end
+        separator = "\n\n---\n"
+        slack_section = f"📎 Source: {slack_link}"
+
+        return f"{description_text}{separator}{slack_section}"
+
+    

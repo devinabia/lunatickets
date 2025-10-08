@@ -67,6 +67,19 @@ class JiraService:
     2. Update tickets - Change existing tickets when users provide the ticket ID (like AI-123)
     3. Handle follow-up questions - Understand when users refer back to previous tickets
 
+    🔴 CRITICAL RESPONSE FORMAT RULE 🔴
+
+    When you call create_issue_sync and it returns successfully, it gives you a pre-formatted response in result["message"].
+    YOU MUST RETURN THIS MESSAGE EXACTLY. Do not modify it, do not add to it, do not paraphrase it.
+
+    Example:
+    - Tool returns: {"success": True, "message": "Ticket created: https://inabia.atlassian.net/browse/AI-3423\nAssigned to: Waqas\nEpic: unknown - would you like a list of epics to choose from?"}
+    - You say: Ticket created: https://inabia.atlassian.net/browse/AI-3423
+    Assigned to: Waqas
+    Epic: unknown - would you like a list of epics to choose from?
+
+    That's it. Nothing before, nothing after. Just the exact message from the tool.
+
     REPORTER ASSIGNMENT:
     - When creating tickets, ALWAYS include the slack_username parameter if available
     - The system will automatically match the Slack username to a Jira user and set them as reporter
@@ -368,9 +381,11 @@ class JiraService:
         reporter_email: str = None,
         issue_type_name: str = None,
         sprint_name: str = None,
-        story_points: int = None,  # NEW: Optional story points
-        epic_key: str = None,  # NEW: Optional epic to link to
+        story_points: int = None,
+        epic_key: str = None,
         slack_username: str = None,
+        channel_id: str = None,
+        message_id: str = None,
         force_update_description_after_create: bool = True,
     ) -> dict:
         """
@@ -379,25 +394,32 @@ class JiraService:
         🔴 **ASSIGNEE IS MANDATORY** 🔴
         This function requires an assignee. If no assignee is provided, you must ask the user.
 
+        ⚠️ **CRITICAL RESPONSE HANDLING** ⚠️
+        When this function succeeds, it returns a pre-formatted message in result["message"].
+        YOU MUST return this message EXACTLY as-is. Do not add commentary or modify it.
+
+        The message format is:
+        Ticket created: [URL]
+        Assigned to: [NAME]
+        Epic: [KEY or "unknown - would you like a list of epics to choose from?"]
+
+        Just return result["message"] directly - nothing else!
+
         Args:
-            assignee_email: REQUIRED - Who to assign ticket to (cannot be empty)
-            project_name_or_key: Project key (defaults to "AI")
-            summary: Ticket title (auto-generated if empty)
-            description_text: Ticket description (auto-generated if empty)
-            priority_name: Priority level (High/Medium/Low)
-            reporter_email: Who reported it (optional)
-            issue_type_name: Issue type (Task/Story/Bug/Epic)
-            sprint_name: Sprint name or "backlog"
-            story_points: Optional story points (1, 2, 3, 5, 8, 13, etc.)
-            epic_key: Optional epic key to link this ticket to (e.g., "AI-123")
+            assignee_email: REQUIRED - Who to assign ticket to
+            summary: Ticket title
+            description_text: Ticket description
+            slack_username: Slack username for reporter matching
+            channel_id: Slack channel ID (for thread link)
+            message_id: Slack message timestamp (for thread link)
+            ... (other args)
 
         Returns:
-            dict: Success with ticket details OR error if assignee missing
+            dict: Contains "success" (bool) and "message" (str - pre-formatted response)
 
         Examples:
-            ✅ create_issue_sync(assignee_email="john", summary="Fix login bug", story_points=5)
-            ✅ create_issue_sync(assignee_email="sarah", summary="API work", epic_key="AI-100")
-            ❌ create_issue_sync(summary="Fix bug") # Will ask for assignee
+            result = create_issue_sync(assignee_email="john", summary="Fix bug", channel_id="C123", message_id="1234.567")
+            # Return result["message"] directly!
         """
         return self.utils.create_issue_implementation(
             project_name_or_key,
@@ -410,7 +432,9 @@ class JiraService:
             sprint_name,
             story_points,
             epic_key,
-            slack_username,  # NEW
+            slack_username,
+            channel_id,
+            message_id,
         )
 
     def update_issue_sync(
@@ -670,23 +694,30 @@ Return only the grammatically corrected request:"""
 
             # Give refined query and context to the agent
             content = f"""
-    USER QUERY: {refined_query}
+            USER QUERY: {refined_query}
 
-    ORIGINAL QUERY: {user_query.query}
+            ORIGINAL QUERY: {user_query.query}
 
-    SLACK USERNAME: {slack_username if slack_username else "Not provided"}
+            SLACK USERNAME: {slack_username if slack_username else "Not provided"}
 
-    CONVERSATION HISTORY: 
-    {chat_history_string}
+            SLACK CONTEXT (for adding thread link to Jira description):
+            - Channel ID: {channel_id if channel_id else "Not provided"}
+            - Message ID: {message_id if message_id else "Not provided"}
 
-    INSTRUCTIONS:
-    - The refined query above has been enhanced with context from the conversation history
-    - Use the refined query as your primary instruction, but refer to original and history for additional context
-    - IMPORTANT: When creating tickets, ALWAYS pass the slack_username parameter to the create_issue_sync tool
-    - The slack_username will be used to automatically match and set the reporter in Jira
-    - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
-    - Call the appropriate tool based on your analysis of the refined query
-    """
+            CONVERSATION HISTORY: 
+            {chat_history_string}
+
+            INSTRUCTIONS:
+            - The refined query above has been enhanced with context from the conversation history
+            - Use the refined query as your primary instruction, but refer to original and history for additional context
+            - IMPORTANT: When creating tickets, ALWAYS pass these parameters to create_issue_sync:
+            * slack_username (for reporter matching)
+            * channel_id (for Slack thread link)
+            * message_id (for Slack thread link)
+            - The Slack thread link will be automatically added to the Jira ticket description
+            - Extract any mentioned assignees, issue keys, priorities, etc. from all sources
+            - Call the appropriate tool based on your analysis of the refined query
+            """
 
             result = self.jira_agent.invoke(
                 {"messages": [{"role": "user", "content": content}]}
