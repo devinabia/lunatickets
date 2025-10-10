@@ -25,22 +25,24 @@ class Utils:
     # SLACK INTEGRATION (RAW DATA ONLY)
     # ========================================
 
-    def extract_chat(self, channel_id):
-        """Extract channel messages + all thread replies, sorted like Slack."""
+    def extract_chat(self, channel_id, message_id=None):
+        """Extract Slack channel messages (and threads) in readable format.
+        If message_id belongs to a thread, include a 'Current Thread' section.
+        """
         if not channel_id:
             return ""
 
-        # ----- time window: today -----
         today = datetime.now().astimezone()
         day_start = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
+        day_end = day_start + timedelta(days=2)
         oldest = day_start.timestamp()
         latest = min(day_end.timestamp(), today.timestamp())
 
-        # ----- fetch channel history (paginate) -----
         messages = []
         cursor = None
+
         try:
+            # ---- Fetch all messages (and thread replies) ----
             while True:
                 resp = client.conversations_history(
                     channel=channel_id,
@@ -55,20 +57,17 @@ class Utils:
                     break
 
                 for m in batch:
-                    # skip deleted/system noise
                     if m.get("subtype") == "message_deleted":
                         continue
-
-                    # replies that were surfaced in-channel are skipped; we fetch under parent
                     if m.get("thread_ts") and m["thread_ts"] != m["ts"]:
+                        # skip replies in history — they'll be fetched via conversations_replies
                         continue
 
-                    # parent/top-level
                     m["_depth"] = 0
                     m["_parent_ts"] = m["ts"]
                     messages.append(m)
 
-                    # ----- fetch thread replies (paginate) -----
+                    # Fetch replies
                     if (m.get("reply_count") or 0) > 0:
                         rcur = None
                         while True:
@@ -80,7 +79,6 @@ class Utils:
                                     cursor=rcur,
                                 )
                             except SlackApiError as e:
-                                # gentle retry on rate limit
                                 if e.response.status_code == 429:
                                     time.sleep(
                                         int(e.response.headers.get("Retry-After", "2"))
@@ -90,7 +88,6 @@ class Utils:
 
                             r_msgs = r.get("messages", [])
                             for rep in r_msgs:
-                                # replies payload includes the parent; skip it
                                 if rep.get("ts") == m["ts"]:
                                     continue
                                 rep["_depth"] = 1
@@ -105,7 +102,7 @@ class Utils:
                 if not cursor:
                     break
 
-            # ----- order like Slack: parent → replies (chronological) -----
+            # ---- Sort messages like Slack (parent → replies) ----
             messages.sort(
                 key=lambda msg: (
                     float(msg.get("_parent_ts") or msg["ts"]),
@@ -117,11 +114,10 @@ class Utils:
             if not messages:
                 return ""
 
-            # ----- helpers for formatting -----
+            # ---- Helpers ----
             user_cache = {}
 
             def get_user_name(user_id, bot_profile=None):
-                # prefer bot profile name if present
                 if bot_profile and bot_profile.get("name"):
                     return bot_profile["name"]
                 if not user_id or user_id == "bot":
@@ -146,13 +142,10 @@ class Utils:
             def clean_text(t: str) -> str:
                 if not t:
                     return ""
-                # <@U123> -> @Name
                 t = re.sub(
                     r"<@([A-Z0-9]+)>", lambda m: f"@{get_user_name(m.group(1))}", t
                 )
-                # <#C123|channel-name> -> #channel-name
                 t = re.sub(r"<#([A-Z0-9]+)\|([^>]+)>", r"#\2", t)
-                # <https://url|label> -> https://url
                 t = re.sub(r"<(https?://[^>|]+)(\|[^>]+)?>", r"\1", t)
                 return t.strip()
 
@@ -167,32 +160,69 @@ class Utils:
                                     for s in el.get("elements", []):
                                         if s.get("type") == "text" and s.get("text"):
                                             parts.append(s["text"])
-                        elif b.get("type") == "section" and b.get("text", {}).get(
-                            "text"
-                        ):
+                        elif b.get("type") == "section" and b.get("text", {}).get("text"):
                             parts.append(b["text"]["text"])
                     t = " ".join(parts)
                 if not t and msg.get("files"):
                     t = " ".join([f.get("name") for f in msg["files"] if f.get("name")])
                 return t
 
-            # ----- format transcript (Slack-like; replies indented) -----
-            formatted_lines = []
-            for msg in messages:
-                txt = clean_text(extract_text(msg))
-                if not txt:
-                    continue
-                ts = datetime.fromtimestamp(float(msg["ts"]), tz=timezone.utc).strftime(
-                    "%H:%M"
-                )
-                uname = get_user_name(msg.get("user"), msg.get("bot_profile"))
-                indent = "    " * msg["_depth"]
-                # optional: a visual pointer for replies
-                arrow = "↳ " if msg["_depth"] else ""
-                formatted_lines.append(f"{indent}{ts} {uname}: {arrow}{txt}")
+            def format_messages(msgs):
+                lines = []
+                for msg in msgs:
+                    txt = clean_text(extract_text(msg))
+                    if not txt:
+                        continue
+                    ts = datetime.fromtimestamp(
+                        float(msg["ts"]), tz=timezone.utc
+                    ).strftime("%H:%M")
+                    uname = get_user_name(msg.get("user"), msg.get("bot_profile"))
+                    indent = "    " * msg["_depth"]
+                    arrow = "↳ " if msg["_depth"] else ""
+                    lines.append(f"{indent}{ts} {uname}: {arrow}{txt}")
+                return lines
 
-            # keep last 200 lines for brevity; adjust as you like
-            return "\n".join(formatted_lines[-200:])
+            # ---- Build full chat output ----
+            formatted_lines = format_messages(messages)
+            chat_output = "\n".join(formatted_lines[-200:])
+
+            # ---- Add Current Thread section if applicable ----
+            if message_id:
+                def ts_equal(a, b):
+                    try:
+                        return abs(float(a) - float(b)) < 0.001
+                    except Exception:
+                        return False
+
+                parent_ts = None
+                for msg in messages:
+                    if ts_equal(msg["ts"], message_id):
+                        parent_ts = msg.get("thread_ts") or msg["ts"]
+                        break
+
+                if parent_ts:
+                    # Fetch missing replies if not already in memory
+                    if not any(m.get("_parent_ts") == parent_ts for m in messages):
+                        try:
+                            r = client.conversations_replies(channel=channel_id, ts=parent_ts, limit=200)
+                            for rep in r.get("messages", []):
+                                if rep["ts"] != parent_ts:
+                                    rep["_depth"] = 1
+                                    rep["_parent_ts"] = parent_ts
+                                    messages.append(rep)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch thread replies: {e}")
+
+                    thread_msgs = [
+                        m for m in messages if m.get("_parent_ts") == parent_ts or ts_equal(m["ts"], parent_ts)
+                    ]
+
+                    if thread_msgs:
+                        thread_section = "\n\n--- 💬 Current Thread ---\n"
+                        thread_section += "\n".join(format_messages(thread_msgs))
+                        chat_output += thread_section
+
+            return chat_output
 
         except Exception as e:
             logger.error(f"Error extracting chat: {e}", exc_info=True)

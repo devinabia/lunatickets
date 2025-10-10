@@ -261,10 +261,10 @@ def looks_like_bot_intent(text: str) -> bool:
 # UPDATED: Now accepts and passes user_id for Slack username extraction
 # -----------------------------------------------------------------------------
 def call_jira_api(
-    query: str, 
-    channel_id: Optional[str] = None, 
+    query: str,
+    channel_id: Optional[str] = None,
     message_id: Optional[str] = None,
-    user_id: Optional[str] = None  # NEW: Slack user ID
+    user_id: Optional[str] = None,  # NEW: Slack user ID
 ) -> str:
     try:
         # Normalize refs → names (covers <@U…>, <@U…|label>, bare U…/W…)
@@ -293,7 +293,6 @@ def call_jira_api(
             api_endpoint,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=30,
         )
         if resp.status_code != 200:
             return f"API Error: {resp.status_code}"
@@ -659,16 +658,18 @@ class BotRouter:
                 channel_id = body.get("channel_id")
                 message_id = body.get("message_id")
                 user_id = body.get("user_id")  # NEW: Extract user_id from payload
-                
+
                 # NEW: Convert Slack user ID to display name
                 slack_username = None
                 if user_id:
                     try:
                         slack_username = get_user_display_name(user_id)
-                        logger.info(f"Resolved user_id {user_id} to username: {slack_username}")
+                        logger.info(
+                            f"Resolved user_id {user_id} to username: {slack_username}"
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to resolve user_id {user_id}: {e}")
-                
+
                 if channel_id:
                     logger.info(
                         f"API request from channel: {channel_id}, message_id: {message_id}, "
@@ -676,7 +677,7 @@ class BotRouter:
                     )
 
                 user_query = UserQuery(query=body["query"])
-                
+
                 # NEW: Pass slack_username to process_query
                 result = await self.jira_service.process_query(
                     user_query, channel_id, message_id, slack_username
@@ -689,7 +690,9 @@ class BotRouter:
                 command = form.get("command", "")
                 text = (form.get("text") or "").strip()
                 channel_id = form.get("channel_id", "")
-                user_id = form.get("user_id", "")  # NEW: Extract user_id from slash command
+                user_id = form.get(
+                    "user_id", ""
+                )  # NEW: Extract user_id from slash command
                 response_url = form.get("response_url", "")
 
                 # NEW: Convert Slack user ID to display name
@@ -697,9 +700,13 @@ class BotRouter:
                 if user_id:
                     try:
                         slack_username = get_user_display_name(user_id)
-                        logger.info(f"Slash command from user_id {user_id} -> {slack_username}")
+                        logger.info(
+                            f"Slash command from user_id {user_id} -> {slack_username}"
+                        )
                     except Exception as e:
-                        logger.warning(f"Failed to resolve slash command user_id {user_id}: {e}")
+                        logger.warning(
+                            f"Failed to resolve slash command user_id {user_id}: {e}"
+                        )
 
                 logger.info(
                     f"Slack - Command: {command}, Text: {text}, Channel: {channel_id}, "
@@ -719,7 +726,11 @@ class BotRouter:
 
                 # NEW: Pass slack_username to background task
                 background_tasks.add_task(
-                    self.process_slash_command_async, text, channel_id, response_url, slack_username
+                    self.process_slash_command_async,
+                    text,
+                    channel_id,
+                    response_url,
+                    slack_username,
                 )
                 return {"response_type": "in_channel", "text": "⏳ Processing ..."}
 
@@ -734,7 +745,11 @@ class BotRouter:
             raise HTTPException(status_code=500, detail="Internal server error")
 
     async def process_slash_command_async(
-        self, text: str, channel_id: str, response_url: str, slack_username: Optional[str] = None
+        self,
+        text: str,
+        channel_id: str,
+        response_url: str,
+        slack_username: Optional[str] = None,
     ):
         """NEW: Added slack_username parameter"""
         try:
