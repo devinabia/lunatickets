@@ -20,6 +20,8 @@ from .views import JiraService
 from .schemas import UserQuery
 from .utilities.utils import Utils
 
+
+Default_Project = "AI"
 # -----------------------------------------------------------------------------
 # Setup & Init
 # -----------------------------------------------------------------------------
@@ -381,7 +383,7 @@ def handle_app_mention(event, say):
         if not cleaned:
             say(
                 {
-                    "text": "Please provide a Jira request after mentioning me. Example:\n`@jirabot create a bug in AI project for login issues`",
+                    "text": f"Please provide a Jira request after mentioning me. Example:\n`@jirabot create a bug in {Default_Project} project for login issues`",
                     "thread_ts": thread_id,
                 }
             )
@@ -448,7 +450,7 @@ def handle_messages(message, say):
         if channel_type == "im":
             if not text:
                 say(
-                    "Please provide a Jira request. Example: `create a task in AI project for user authentication`"
+                    f"Please provide a Jira request. Example: `create a task in {Default_Project} project for user authentication`"
                 )
                 return
 
@@ -721,7 +723,7 @@ class BotRouter:
                 if not text:
                     return {
                         "response_type": "ephemeral",
-                        "text": "Please provide a request. Example: `/jira create a bug in AI project`",
+                        "text": f"Please provide a request. Example: `/jira create a bug in {Default_Project} project`",
                     }
 
                 # NEW: Pass slack_username to background task
