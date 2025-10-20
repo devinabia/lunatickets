@@ -2264,7 +2264,6 @@ class Utils:
             for i, result in enumerate(search_results, 1):
                 payload = result.payload
                 content = payload.get("text", "")
-                print(content)
                 if content.strip():  # Only add non-empty content
                     retrieved_content.append(
                         {
