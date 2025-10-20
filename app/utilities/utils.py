@@ -1,4 +1,4 @@
-import os, re
+import os, re, asyncio
 import time
 import json
 import logging
@@ -6,10 +6,15 @@ from datetime import datetime, timedelta, timezone
 from slack_sdk import WebClient
 from dotenv import load_dotenv
 from slack_sdk.errors import SlackApiError
+from openai import OpenAI
+from qdrant_client import QdrantClient
+
 
 load_dotenv()
 client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 logger = logging.getLogger(__name__)
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
 class Utils:
@@ -160,7 +165,9 @@ class Utils:
                                     for s in el.get("elements", []):
                                         if s.get("type") == "text" and s.get("text"):
                                             parts.append(s["text"])
-                        elif b.get("type") == "section" and b.get("text", {}).get("text"):
+                        elif b.get("type") == "section" and b.get("text", {}).get(
+                            "text"
+                        ):
                             parts.append(b["text"]["text"])
                     t = " ".join(parts)
                 if not t and msg.get("files"):
@@ -182,45 +189,78 @@ class Utils:
                     lines.append(f"{indent}{ts} {uname}: {arrow}{txt}")
                 return lines
 
-            # ---- Build full chat output ----
-            formatted_lines = format_messages(messages)
-            chat_output = "\n".join(formatted_lines[-200:])
+            def ts_equal(a, b):
+                try:
+                    return abs(float(a) - float(b)) < 0.001
+                except Exception:
+                    return False
 
-            # ---- Add Current Thread section if applicable ----
+            # ---- Determine current thread if message_id provided ----
+            current_thread_ts = None
             if message_id:
-                def ts_equal(a, b):
-                    try:
-                        return abs(float(a) - float(b)) < 0.001
-                    except Exception:
-                        return False
-
-                parent_ts = None
                 for msg in messages:
                     if ts_equal(msg["ts"], message_id):
-                        parent_ts = msg.get("thread_ts") or msg["ts"]
+                        current_thread_ts = msg.get("thread_ts") or msg["ts"]
                         break
 
-                if parent_ts:
-                    # Fetch missing replies if not already in memory
-                    if not any(m.get("_parent_ts") == parent_ts for m in messages):
-                        try:
-                            r = client.conversations_replies(channel=channel_id, ts=parent_ts, limit=200)
-                            for rep in r.get("messages", []):
-                                if rep["ts"] != parent_ts:
-                                    rep["_depth"] = 1
-                                    rep["_parent_ts"] = parent_ts
-                                    messages.append(rep)
-                        except Exception as e:
-                            logger.warning(f"Failed to fetch thread replies: {e}")
+                # Fetch missing replies if not already in memory
+                if current_thread_ts and not any(
+                    m.get("_parent_ts") == current_thread_ts for m in messages
+                ):
+                    try:
+                        r = client.conversations_replies(
+                            channel=channel_id, ts=current_thread_ts, limit=200
+                        )
+                        for rep in r.get("messages", []):
+                            if rep["ts"] != current_thread_ts:
+                                rep["_depth"] = 1
+                                rep["_parent_ts"] = current_thread_ts
+                                messages.append(rep)
+                        # Re-sort after adding new messages
+                        messages.sort(
+                            key=lambda msg: (
+                                float(msg.get("_parent_ts") or msg["ts"]),
+                                msg["_depth"],
+                                float(msg["ts"]),
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch thread replies: {e}")
 
-                    thread_msgs = [
-                        m for m in messages if m.get("_parent_ts") == parent_ts or ts_equal(m["ts"], parent_ts)
-                    ]
+            # ---- Separate messages into Previous and Current threads ----
+            if current_thread_ts:
+                # Separate current thread messages from other messages
+                current_thread_msgs = []
+                previous_msgs = []
 
-                    if thread_msgs:
-                        thread_section = "\n\n--- 💬 Current Thread ---\n"
-                        thread_section += "\n".join(format_messages(thread_msgs))
-                        chat_output += thread_section
+                for msg in messages:
+                    parent_ts = msg.get("_parent_ts") or msg["ts"]
+                    if parent_ts == current_thread_ts:
+                        current_thread_msgs.append(msg)
+                    else:
+                        previous_msgs.append(msg)
+
+                # Build output with both sections
+                chat_output = ""
+
+                # Add Previous Chat section (excluding current thread)
+                if previous_msgs:
+                    chat_output = "--- 📜 Previous Chat ---\n"
+                    formatted_prev = format_messages(previous_msgs)
+                    # Limit to last 150 messages for previous chat to save space
+                    chat_output += "\n".join(formatted_prev[-150:])
+
+                # Add Current Thread section
+                if current_thread_msgs:
+                    if chat_output:
+                        chat_output += "\n\n"
+                    chat_output += "--- 💬 Current Thread ---\n"
+                    chat_output += "\n".join(format_messages(current_thread_msgs))
+            else:
+                # No specific thread selected, show all as general chat
+                chat_output = "--- 📜 Channel Messages ---\n"
+                formatted_lines = format_messages(messages)
+                chat_output += "\n".join(formatted_lines[-200:])
 
             return chat_output
 
@@ -2179,3 +2219,72 @@ class Utils:
         )
 
         return response
+
+    async def _get_embedding(self, text: str) -> list:
+        """Get embedding using OpenAI API"""
+        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        response = await asyncio.to_thread(
+            openai_client.embeddings.create,
+            input=text,
+            model="text-embedding-3-small",
+            dimensions=1024,
+        )
+        return response.data[0].embedding
+
+    async def search_confluence_knowledge(self, user_query: str):
+        """Search knowledge base and return retrieved content"""
+        try:
+            if not user_query.strip():
+                return {"status": "error", "message": "Query cannot be empty"}
+            qdrant_client = QdrantClient(
+                url=QDRANT_URL,
+                api_key=QDRANT_API_KEY,
+                prefer_grpc=False,
+                check_compatibility=False,
+            )
+            QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION")
+
+            query_vector = await self._get_embedding(user_query)
+            search_results = await asyncio.to_thread(
+                qdrant_client.search,
+                collection_name=QDRANT_COLLECTION,
+                query_vector=query_vector,
+                limit=8,
+                with_payload=True,
+            )
+            if not search_results:
+                return {
+                    "status": "success",
+                    "retrieved_content": [],
+                    "total_pages_searched": 0,
+                }
+
+            retrieved_content = []
+
+            for i, result in enumerate(search_results, 1):
+                payload = result.payload
+                content = payload.get("text", "")
+                print(content)
+                if content.strip():  # Only add non-empty content
+                    retrieved_content.append(
+                        {
+                            "doc_id": i,
+                            "title": payload.get("title", "Unknown"),
+                            "space": payload.get(
+                                "space", payload.get("project", "Unknown")
+                            ),
+                            "content": content,
+                            "url": payload.get("url", ""),
+                            "score": result.score,
+                        }
+                    )
+
+            return {
+                "status": "success",
+                "query": user_query,
+                "retrieved_content": retrieved_content,
+                "total_pages_searched": len(retrieved_content),
+            }
+
+        except Exception as e:
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}

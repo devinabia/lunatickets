@@ -5,9 +5,9 @@ import logging
 import requests
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any, Tuple
-
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-
+from .utilities.cronjob_functions import Cronjob
 from fastapi import FastAPI, APIRouter, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -17,6 +17,7 @@ from slack_sdk import WebClient
 
 # Your existing imports
 from .views import JiraService
+from .qdrant import QdrantService
 from .schemas import UserQuery
 from .utilities.utils import Utils
 
@@ -608,12 +609,22 @@ def handle_create_shortcut(message, say):
         logger.exception("Error in handle_create_shortcut")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start the scheduler
+    await Cronjob.start_scheduler()
+    yield
+    # Shutdown: Stop the scheduler
+    Cronjob.scheduler.shutdown()
+
+
 # -----------------------------------------------------------------------------
 # FastAPI app + routes
 # -----------------------------------------------------------------------------
 class BotRouter:
     def __init__(self):
         self.jira_service = JiraService()
+        self.qdrant_service = QdrantService()
         self.router = APIRouter()
         self.setup_routes()
 
@@ -621,6 +632,9 @@ class BotRouter:
         self.router.add_api_route("/ask-query", self.handle_ask_query, methods=["POST"])
         self.router.add_api_route(
             "/test-jira-query", self.jira_service.process_query, methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/dump-data", self.qdrant_service.dump_all_data_to_qdrant, methods=["POST"]
         )
 
     async def handle_jira_query(self, request: Request):
@@ -789,6 +803,7 @@ def create_app():
         version="1.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     bot_router = BotRouter()

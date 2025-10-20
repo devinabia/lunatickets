@@ -14,11 +14,192 @@
     "timestamp": "2025-09-11T13:30:25.228678"
   },
   {
-  "message_id": "1757497811.329199",
-  "channel_id": "C09EG87L9NJ",
-  "channel_name": "adnan-test-channel",
-  "issue_key": "BUN-6",
-  "timestamp": "2025-09-11T13:30:25.228678"
-
-}
+    "message_id": "1757497811.329199",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "BUN-6",
+    "timestamp": "2025-09-11T13:30:25.228678"
+  },
+  {
+    "message_id": "1759905295.667859",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3434",
+    "timestamp": "2025-10-08T11:35:37.425360"
+  },
+  {
+    "message_id": "1759905443.485199",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3435",
+    "timestamp": "2025-10-08T11:38:01.053818"
+  },
+  {
+    "message_id": "1759905180.692939",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3436",
+    "timestamp": "2025-10-08T11:39:44.622713"
+  },
+  {
+    "message_id": "1759905206.520519",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3437",
+    "timestamp": "2025-10-08T11:40:20.636631"
+  },
+  {
+    "message_id": "1759905672.233669",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3438",
+    "timestamp": "2025-10-08T11:41:42.548372"
+  },
+  {
+    "message_id": "1759907668.091789",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3439",
+    "timestamp": "2025-10-08T12:15:03.270240"
+  },
+  {
+    "message_id": "1759907729.932889",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3440",
+    "timestamp": "2025-10-08T12:16:03.307987"
+  },
+  {
+    "message_id": "1759908204.553189",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3441",
+    "timestamp": "2025-10-08T12:24:02.593952"
+  },
+  {
+    "message_id": "1759908315.645949",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3442",
+    "timestamp": "2025-10-08T12:25:49.800514"
+  },
+  {
+    "message_id": "1759908850.873709",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3443",
+    "timestamp": "2025-10-08T12:34:46.344187"
+  },
+  {
+    "message_id": "1759908913.541629",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3444",
+    "timestamp": "2025-10-08T12:35:43.516750"
+  },
+  {
+    "message_id": "1759909581.470399",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3445",
+    "timestamp": "2025-10-08T12:46:53.994460"
+  },
+  {
+    "message_id": "1759915089.516799",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3446",
+    "timestamp": "2025-10-08T14:19:24.362866"
+  },
+  {
+    "message_id": "1759915089.516799",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3447",
+    "timestamp": "2025-10-08T14:19:51.987461"
+  },
+  {
+    "message_id": "1759915206.608709",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3448",
+    "timestamp": "2025-10-08T14:20:42.528437"
+  },
+  {
+    "message_id": "1759915089.516799",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3449",
+    "timestamp": "2025-10-08T14:25:10.386970"
+  },
+  {
+    "message_id": "1759915672.224029",
+    "channel_id": "C09EX4UQ4EA",
+    "channel_name": "gpt5-mini-test",
+    "issue_key": "AI-3450",
+    "timestamp": "2025-10-08T14:28:36.165432"
+  },
+  {
+    "message_id": "1759917014.945549",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3455",
+    "timestamp": "2025-10-08T14:50:58.443786"
+  },
+  {
+    "message_id": "1760089582.164779",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3463",
+    "timestamp": "2025-10-10T14:47:08.606416"
+  },
+  {
+    "message_id": "1760089893.835069",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3464",
+    "timestamp": "2025-10-10T14:52:19.118010"
+  },
+  {
+    "message_id": "1760090033.314469",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3465",
+    "timestamp": "2025-10-10T14:54:33.823413"
+  },
+  {
+    "message_id": "1760090196.980509",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3466",
+    "timestamp": "2025-10-10T14:57:15.206675"
+  },
+  {
+    "message_id": "1760599356.479009",
+    "channel_id": "C09EG87L9NJ",
+    "channel_name": "adnan-test-channel",
+    "issue_key": "AI-3475",
+    "timestamp": "2025-10-16T12:23:20.589914"
+  },
+  {
+    "message_id": "1760599734.700079",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3476",
+    "timestamp": "2025-10-16T12:29:38.524960"
+  },
+  {
+    "message_id": "1760600088.460979",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3477",
+    "timestamp": "2025-10-16T12:37:17.469549"
+  },
+  {
+    "message_id": "1760602075.491479",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "AI-3478",
+    "timestamp": "2025-10-16T13:08:43.945360"
+  }
 ]
