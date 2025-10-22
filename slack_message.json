@@ -201,5 +201,26 @@
     "channel_name": "jira-ticket-test",
     "issue_key": "AI-3478",
     "timestamp": "2025-10-16T13:08:43.945360"
+  },
+  {
+    "message_id": "1761130069.489539",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "DATA-675",
+    "timestamp": "2025-10-22T15:48:24.472863"
+  },
+  {
+    "message_id": "1761131802.406649",
+    "channel_id": "C09F1HNREE8",
+    "channel_name": "jira-ticket-test",
+    "issue_key": "DATA-676",
+    "timestamp": "2025-10-22T16:17:20.059115"
+  },
+  {
+    "message_id": "1761137482.706579",
+    "channel_id": "C09303RV2G2",
+    "channel_name": "luna-testing",
+    "issue_key": "AI-3510",
+    "timestamp": "2025-10-22T17:52:00.695693"
   }
 ]
