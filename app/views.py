@@ -913,6 +913,7 @@ Return only the grammatically corrected request:"""
 
                 # Extract issue key from response
                 issue_key = Utils.extract_issue_key_from_response(formatted_response)
+
                 logger.info(f"Extracted issue key: {issue_key}")
 
                 # Check if this is a creation response - EXPANDED KEYWORDS for multi-step

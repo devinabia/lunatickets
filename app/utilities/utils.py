@@ -324,19 +324,34 @@ class Utils:
         """
         Return project key by searching both Jira projects and Confluence spaces.
 
+        If name_or_key is empty or None, returns the default project from environment.
+
         Search Priority:
-        1. Exact Jira project key match
-        2. Exact Jira project name match
-        3. Partial Jira project name match
-        4. Search Confluence spaces and find linked Jira project
+        1. Use default project if name_or_key is empty
+        2. Exact Jira project key match
+        3. Exact Jira project name match
+        4. Partial Jira project name match
+        5. Search Confluence spaces and find linked Jira project
 
         Examples:
+            - "" -> "AI" (uses default project)
+            - None -> "AI" (uses default project)
             - "DATA" -> "DATA" (exact key match)
             - "Customers" -> "CUST" (exact name match)
             - "data squad" -> "DATA" (found via Confluence space)
         """
+        # ========================================
+        # STEP 0: Handle empty/None with default
+        # ========================================
         if not name_or_key or not name_or_key.strip():
-            raise RuntimeError("Project name or key cannot be empty")
+            default_project = os.getenv("Default_Project")
+            if not default_project or not default_project.strip():
+                raise RuntimeError(
+                    "No project specified and Default_Project environment variable is not set. "
+                    "Please either specify a project or set the Default_Project environment variable."
+                )
+            logger.info(f"✅ Using default project: {default_project}")
+            return default_project.strip()
 
         try:
             # ========================================
@@ -403,7 +418,7 @@ class Utils:
 
         except Exception as e:
             logger.error(f"Error fetching projects from Jira: {e}")
-            raise RuntimeError(f"Failed to fetch projects: {str(e)}")
+            raise RuntimeError(f"Failed to resolve project: {str(e)}")
 
     def _search_confluence_spaces_for_project(self, space_name: str) -> dict:
         """
