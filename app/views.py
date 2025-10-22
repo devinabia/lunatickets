@@ -35,7 +35,7 @@ class JiraService:
         self.email = os.getenv("JIRA_EMAIL")
         self.token = os.getenv("JIRA_TOKEN")
         self.default_issue_type = "Task"
-        self.default_project = "AI"
+        self.default_project = os.getenv("Default_Project")
 
         # Session for Jira API calls
         self.session = requests.Session()
@@ -313,6 +313,22 @@ class JiraService:
 
         NEVER leave description empty - always use this format.
 
+        PROJECT SPECIFICATION:
+
+        Users can specify projects using Jira project KEY, project NAME, or Confluence SPACE name:
+        - Project Key: Short identifier like "DATA", "AI", "CUST"
+        - Project Name: Full Jira project name
+        - Space Name: Confluence space name like "data squad", "engineering team"
+        - All formats are automatically resolved to the correct Jira project
+
+        Examples:
+        - "create ticket in data squad" ✓ (Confluence space name)
+        - "create ticket in DATA" ✓ (Jira project key)
+        - "create ticket in Customers" ✓ (Jira project name)
+        - "create ticket in customers" ✓ (case-insensitive)
+
+        The system searches Jira projects first, then Confluence spaces if no match found.
+        
         TICKET CREATION WORKFLOW
 
         STEP 1: Analyze Chat History & Thread Context
@@ -608,25 +624,64 @@ class JiraService:
             epic_key,
         )
 
-    def get_project_assignable_users_sync(self, project_key: str = "AI") -> dict:
+    def get_project_assignable_users_sync(
+        self, project_key: str = os.getenv("Default_Project")
+    ) -> dict:
         """
         Get list of users who can be assigned tickets in a project.
-        Simple tool for showing available assignees to users.
 
         Args:
-            project_key: Project key like "AI", "BUN", etc. (defaults to "AI")
+            project_key: Project key OR name (e.g., "AI", "DATA", "Customers")
 
         Returns:
             dict: List of assignable users with their display names
         """
         try:
-            url = f"{self.base_url}/rest/api/3/user/assignable/search"
-            params = {"project": project_key, "maxResults": 20}
+            logger.info(f"🔍 Getting assignable users for: '{project_key}'")
 
+            # CRITICAL: Resolve project name to key first
+            try:
+                resolved_project_key = self.utils.resolve_project_key(project_key)
+                logger.info(f"✅ Resolved '{project_key}' → '{resolved_project_key}'")
+            except Exception as resolve_error:
+                logger.error(
+                    f"❌ Failed to resolve project '{project_key}': {resolve_error}"
+                )
+
+                # Get list of available projects for helpful error message
+                try:
+                    all_projects_response = self.session.get(
+                        f"{self.base_url}/rest/api/3/project/search", timeout=20
+                    )
+                    if all_projects_response.status_code == 200:
+                        projects = all_projects_response.json().get("values", [])
+                        available = [f"{p['key']} ({p['name']})" for p in projects[:10]]
+
+                        return {
+                            "success": False,
+                            "error": f"Could not find project or space '{project_key}'.\n\nAvailable Jira projects: {', '.join(available)}",
+                            "users": [],
+                        }
+                except Exception:
+                    pass
+
+                return {
+                    "success": False,
+                    "error": f"Could not find project or space '{project_key}'. Please check the name and try again.",
+                    "users": [],
+                }
+
+            # Now fetch users using the resolved key
+            url = f"{self.base_url}/rest/api/3/user/assignable/search"
+            params = {"project": resolved_project_key, "maxResults": 20}
+
+            logger.info(f"📡 Calling Jira API with project={resolved_project_key}")
             response = self.session.get(url, params=params, timeout=30)
+            logger.info(f"📨 API Response: {response.status_code}")
 
             if response.status_code == 200:
                 users_data = response.json()
+                logger.info(f"👥 Found {len(users_data)} users")
 
                 # Simple list of display names
                 user_names = []
@@ -636,32 +691,45 @@ class JiraService:
                         if display_name:
                             user_names.append(display_name)
 
-                user_names.sort()  # Alphabetical order
+                user_names.sort()
 
                 return {
                     "success": True,
-                    "project": project_key,
+                    "project": resolved_project_key,
+                    "original_input": project_key,
                     "users": user_names,
                     "formatted_list": "\n".join([f"• {name}" for name in user_names]),
                 }
-            else:
+            elif response.status_code == 404:
+                logger.error(f"❌ Project '{resolved_project_key}' not found in Jira")
                 return {
                     "success": False,
-                    "error": f"Could not fetch users for project {project_key}",
+                    "error": f"Project '{resolved_project_key}' does not exist in Jira. The project key may be incorrect.",
+                    "users": [],
+                }
+            else:
+                logger.error(f"❌ API error: {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"Could not fetch users for project {resolved_project_key}: {response.status_code}",
                     "users": [],
                 }
 
         except Exception as e:
-            logger.error(f"Error fetching project users: {e}")
-            return {"success": False, "error": str(e), "users": []}
+            logger.error(
+                f"❌ Exception in get_project_assignable_users_sync: {e}", exc_info=True
+            )
+            return {"success": False, "error": f"Error: {str(e)}", "users": []}
 
-    def get_project_epics_sync(self, project_key: str = "AI") -> dict:
+    def get_project_epics_sync(
+        self, project_key: str = os.getenv("Default_Project")
+    ) -> dict:
         """
         Get list of epics for a project to allow users to link tickets to epics.
         Now uses the jira Python library for reliable epic retrieval.
 
         Args:
-            project_key: Project key like "AI", "BUN", etc. (defaults to "AI")
+            project_key: Project key like os.getenv("Default_Project"), "BUN", etc. (defaults to os.getenv("Default_Project"))
 
         Returns:
             dict: List of epics with their keys and summaries
@@ -800,7 +868,6 @@ Return only the grammatically corrected request:"""
 
             # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id, message_id)
-            print(chat_history_string)
             # Query refinement functionality
             refined_query = await self.refactor_query_with_context(
                 user_query.query, chat_history_string
@@ -845,9 +912,7 @@ Return only the grammatically corrected request:"""
                 formatted_response = self.utils.format_for_slack(response_content)
 
                 # Extract issue key from response
-                issue_key = self.utils.extract_issue_key_from_response(
-                    formatted_response
-                )
+                issue_key = Utils.extract_issue_key_from_response(formatted_response)
                 logger.info(f"Extracted issue key: {issue_key}")
 
                 # Check if this is a creation response - EXPANDED KEYWORDS for multi-step

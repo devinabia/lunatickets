@@ -321,18 +321,217 @@ class Utils:
         }
 
     def resolve_project_key(self, name_or_key: str) -> str:
-        """Return project key by name or key."""
-        r = self.session.get(f"{self.base_url}/rest/api/3/project/search", timeout=20)
-        r.raise_for_status()
-        projects = r.json().get("values", [])
+        """
+        Return project key by searching both Jira projects and Confluence spaces.
 
-        for p in projects:
-            if (
-                p["key"].lower() == name_or_key.lower()
-                or p["name"].lower() == name_or_key.lower()
-            ):
-                return p["key"]
-        raise RuntimeError(f"Project '{name_or_key}' not found.")
+        Search Priority:
+        1. Exact Jira project key match
+        2. Exact Jira project name match
+        3. Partial Jira project name match
+        4. Search Confluence spaces and find linked Jira project
+
+        Examples:
+            - "DATA" -> "DATA" (exact key match)
+            - "Customers" -> "CUST" (exact name match)
+            - "data squad" -> "DATA" (found via Confluence space)
+        """
+        if not name_or_key or not name_or_key.strip():
+            raise RuntimeError("Project name or key cannot be empty")
+
+        try:
+            # ========================================
+            # STEP 1: Search in Jira Projects
+            # ========================================
+            r = self.session.get(
+                f"{self.base_url}/rest/api/3/project/search", timeout=20
+            )
+            r.raise_for_status()
+            projects = r.json().get("values", [])
+
+            if not projects:
+                logger.warning("No Jira projects found")
+
+            search_term = name_or_key.strip().lower()
+
+            # Priority 1: Exact key match (case-insensitive)
+            for p in projects:
+                if p["key"].lower() == search_term:
+                    logger.info(f"✅ Exact key match: '{name_or_key}' -> {p['key']}")
+                    return p["key"]
+
+            # Priority 2: Exact name match (case-insensitive)
+            for p in projects:
+                if p["name"].lower() == search_term:
+                    logger.info(
+                        f"✅ Exact name match: '{name_or_key}' -> {p['key']} ({p['name']})"
+                    )
+                    return p["key"]
+
+            # Priority 3: Partial name match
+            for p in projects:
+                if search_term in p["name"].lower() or p["name"].lower() in search_term:
+                    logger.info(
+                        f"✅ Partial name match: '{name_or_key}' -> {p['key']} ({p['name']})"
+                    )
+                    return p["key"]
+
+            logger.info(
+                f"⚠️ No match in Jira projects for '{name_or_key}', searching Confluence spaces..."
+            )
+
+            # ========================================
+            # STEP 2: Search in Confluence Spaces
+            # ========================================
+            confluence_match = self._search_confluence_spaces_for_project(name_or_key)
+
+            if confluence_match:
+                logger.info(
+                    f"✅ Found via Confluence space: '{name_or_key}' -> {confluence_match['project_key']} (Space: {confluence_match['space_name']})"
+                )
+                return confluence_match["project_key"]
+
+            # ========================================
+            # STEP 3: No match found anywhere
+            # ========================================
+            available_projects = [f"{p['key']} ({p['name']})" for p in projects[:10]]
+            error_msg = (
+                f"Project or space '{name_or_key}' not found.\n"
+                f"Available Jira projects: {', '.join(available_projects)}"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        except Exception as e:
+            logger.error(f"Error fetching projects from Jira: {e}")
+            raise RuntimeError(f"Failed to fetch projects: {str(e)}")
+
+    def _search_confluence_spaces_for_project(self, space_name: str) -> dict:
+        """
+        Search Confluence spaces and return the linked Jira project key.
+
+        Args:
+            space_name: Confluence space name (e.g., "data squad")
+
+        Returns:
+            dict: {"project_key": "DATA", "space_name": "Data Squad"} or None
+        """
+        try:
+            from jira import JIRA
+
+            # Initialize Jira client
+            jira_client = JIRA(
+                server=self.base_url, basic_auth=(self.email, self.token)
+            )
+
+            # Get all projects to check their keys
+            all_projects = jira_client.projects()
+
+            search_term = space_name.strip().lower()
+
+            # Try to match space name with project key or name patterns
+            for project in all_projects:
+                # Check if the space name matches project key
+                if project.key.lower() == search_term:
+                    return {
+                        "project_key": project.key,
+                        "space_name": space_name,
+                        "match_type": "key_match",
+                    }
+
+                # Check if space name is similar to project name
+                project_name_lower = project.name.lower()
+
+                # Exact match
+                if project_name_lower == search_term:
+                    return {
+                        "project_key": project.key,
+                        "space_name": project.name,
+                        "match_type": "name_match",
+                    }
+
+                # Check if space name words are in project key
+                # Example: "data squad" -> words: ["data", "squad"] -> check if "DATA" contains them
+                space_words = search_term.split()
+                project_key_lower = project.key.lower()
+
+                # If first word of space matches project key
+                if space_words and space_words[0] in project_key_lower:
+                    return {
+                        "project_key": project.key,
+                        "space_name": space_name,
+                        "match_type": "fuzzy_match",
+                    }
+
+            # Alternative: Try using Confluence API if available
+            # This requires Confluence access which you might have
+            try:
+                confluence_result = self._search_confluence_api(space_name)
+                if confluence_result:
+                    return confluence_result
+            except Exception as conf_error:
+                logger.warning(f"Confluence API search failed: {conf_error}")
+
+            return None
+
+        except ImportError:
+            logger.warning("jira library not available for space search")
+            return None
+        except Exception as e:
+            logger.warning(f"Error searching Confluence spaces: {e}")
+            return None
+
+    def _search_confluence_api(self, space_name: str) -> dict:
+        """
+        Search Confluence spaces using REST API and find linked Jira projects.
+
+        This method attempts to find the Jira project linked to a Confluence space.
+        """
+        try:
+            # Get Confluence spaces
+            confluence_url = self.base_url.replace("/jira", "/wiki")
+
+            # Search for spaces
+            r = self.session.get(
+                f"{confluence_url}/rest/api/space", params={"limit": 100}, timeout=20
+            )
+
+            if r.status_code != 200:
+                logger.warning(f"Could not access Confluence API: {r.status_code}")
+                return None
+
+            spaces = r.json().get("results", [])
+            search_term = space_name.strip().lower()
+
+            for space in spaces:
+                space_key = space.get("key", "").lower()
+                space_display_name = space.get("name", "").lower()
+
+                # Check if space name matches
+                if search_term == space_display_name or search_term == space_key:
+                    # Try to find linked Jira project
+                    # Usually the space key matches the project key
+                    space_key_upper = space.get("key", "").upper()
+
+                    # Verify this project exists in Jira
+                    try:
+                        verify_response = self.session.get(
+                            f"{self.base_url}/rest/api/3/project/{space_key_upper}",
+                            timeout=10,
+                        )
+                        if verify_response.status_code == 200:
+                            return {
+                                "project_key": space_key_upper,
+                                "space_name": space.get("name"),
+                                "match_type": "confluence_api",
+                            }
+                    except Exception:
+                        pass
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Confluence API search error: {e}")
+            return None
 
     def get_project_users(self, project_key: str, max_results: int = 50) -> list:
         """Get list of users assignable to issues in a project."""
@@ -1063,7 +1262,7 @@ class Utils:
 
     def create_issue_implementation(
         self,
-        project_name_or_key: str = "",
+        project_name_or_key: str = str(os.getenv("Default_Project")),
         summary: str = "",
         description_text: str = "",
         assignee_email: str = "",
@@ -1087,10 +1286,20 @@ class Utils:
         if issue_type_name is None:
             issue_type_name = "Story"
 
-        # Use default project if not provided
-        if not project_name_or_key or project_name_or_key.strip() == "":
-            project_name_or_key = "AI"
-            logger.info(f"No project specified, using default: AI")
+        try:
+            project_key = self.resolve_project_key(project_name_or_key)
+            logger.info(
+                f"✅ Resolved project '{project_name_or_key}' -> '{project_key}'"
+            )
+        except Exception as resolve_error:
+            logger.error(
+                f"❌ Failed to resolve project '{project_name_or_key}': {resolve_error}"
+            )
+            return {
+                "success": False,
+                "error": str(resolve_error),
+                "message": f"Could not find project '{project_name_or_key}'. Please check the project name or key. {str(resolve_error)}",
+            }
 
         # Generate default summary if empty
         if not summary or summary.strip() == "":
@@ -1111,7 +1320,6 @@ class Utils:
                 logger.warning("⚠️ Failed to generate Slack thread link")
 
         try:
-            project_key = self.resolve_project_key(project_name_or_key)
 
             # Handle sprint selection with user fallback
             if not sprint_name:
@@ -2183,7 +2391,7 @@ class Utils:
         assignee_name: str,
         epic_key: str = None,
         jira_url: str = None,
-        project_key: str = "AI",
+        project_key: str = str(os.getenv("Default_Project")),
     ) -> str:
         """
         Format a strict, consistent ticket creation response with Slack hyperlink formatting.

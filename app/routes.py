@@ -22,7 +22,7 @@ from .schemas import UserQuery
 from .utilities.utils import Utils
 
 
-Default_Project = "AI"
+Default_Project = os.getenv("Default_Project")
 # -----------------------------------------------------------------------------
 # Setup & Init
 # -----------------------------------------------------------------------------
