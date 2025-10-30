@@ -344,11 +344,11 @@ class Utils:
                 chat_output = ""
 
                 # Add Previous Chat section (excluding current thread)
-                if previous_msgs:
-                    chat_output = "--- 📜 Previous Chat ---\n"
-                    formatted_prev = format_messages(previous_msgs)
-                    # Limit to last 150 messages for previous chat to save space
-                    chat_output += "\n".join(formatted_prev[-150:])
+                # if previous_msgs:
+                #     chat_output = "--- 📜 Previous Chat ---\n"
+                #     formatted_prev = format_messages(previous_msgs)
+                #     # Limit to last 150 messages for previous chat to save space
+                #     chat_output += "\n".join(formatted_prev[-150:])
 
                 # Add Current Thread section
                 if current_thread_msgs:
