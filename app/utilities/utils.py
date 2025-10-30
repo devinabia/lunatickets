@@ -17,6 +17,38 @@ QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
+if os.getenv("ORG") == "INABIA":
+    JIRA_ACCOUNTS = {
+        "default": {
+            "name": "Default Account",
+            "base_url": os.getenv("JIRA_BASE_URL"),
+            "email": os.getenv("JIRA_EMAIL"),
+            "token": os.getenv("JIRA_TOKEN"),
+            "project_key": os.getenv("Default_Project"),
+            "description": "Main Jira workspace for general projects",
+        },
+        "amac": {
+            "name": "Amac Account",
+            "base_url": os.getenv("JIRA_AMAC_BASE_URL"),
+            "email": os.getenv("JIRA_AMAC_EMAIL"),
+            "token": os.getenv("JIRA_AMAC_TOKEN"),
+            "project_key": os.getenv("JIRA_AMAC_PROJECT", "AMAC"),
+            "description": "Amac-specific Jira workspace",
+        },
+    }
+else:
+    JIRA_ACCOUNTS = {
+        "default": {
+            "name": "Default Account",
+            "base_url": os.getenv("JIRA_BASE_URL"),
+            "email": os.getenv("JIRA_EMAIL"),
+            "token": os.getenv("JIRA_TOKEN"),
+            "project_key": os.getenv("Default_Project"),
+            "description": "Main Jira workspace for general projects",
+        }
+    }
+
+
 class Utils:
     """Pure utility class - all intelligence handled by LangGraph agent."""
 
@@ -25,6 +57,74 @@ class Utils:
         self.email = email
         self.token = token
         self.session = session
+        self.current_account = "default"  # NEW: Track active account
+
+    @staticmethod
+    def get_account_config(account_key: str = "default"):
+        """Get account configuration safely with fallback to default"""
+        return JIRA_ACCOUNTS.get(account_key, JIRA_ACCOUNTS["default"])
+
+    def switch_account(self, account_key: str) -> bool:
+        """
+        Switch to a different Jira account dynamically.
+        Updates base_url, credentials, and session authentication.
+
+        Args:
+            account_key: Account identifier ('default', 'amac', 'client_x', etc.)
+
+        Returns:
+            bool: True if switch successful, False otherwise
+
+        Examples:
+            utils.switch_account("amac")  # Switch to Amac account
+            utils.switch_account("default")  # Switch back to default
+        """
+        try:
+            # Import here to avoid circular imports
+
+            config = Utils.get_account_config(account_key)
+
+            # Validate config
+            if not all(k in config for k in ["base_url", "email", "token"]):
+                logger.error(f"Invalid config for account: {account_key}")
+                return False
+
+            # Update instance variables
+            self.current_account = account_key
+            self.base_url = config["base_url"]
+            self.email = config["email"]
+            self.token = config["token"]
+
+            # Update session authentication
+            self.session.auth = (self.email, self.token)
+
+            logger.info(
+                f"✅ Switched to Jira account: '{account_key}' ({config.get('name', 'Unknown')})"
+            )
+            logger.info(f"   Base URL: {self.base_url}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to switch account to '{account_key}': {e}")
+            return False
+
+    def get_current_account(self) -> str:
+        """Get currently active account key"""
+        return self.current_account
+
+    def get_current_account_info(self) -> dict:
+        """Get full info about currently active account"""
+        try:
+
+            return Utils.get_account_config(self.current_account)
+        except Exception as e:
+            logger.error(f"Error getting account info: {e}")
+            return {
+                "name": "Unknown",
+                "base_url": self.base_url,
+                "current_account": self.current_account,
+            }
 
     # ========================================
     # SLACK INTEGRATION (RAW DATA ONLY)
@@ -344,13 +444,19 @@ class Utils:
         # STEP 0: Handle empty/None with default
         # ========================================
         if not name_or_key or not name_or_key.strip():
-            default_project = os.getenv("Default_Project")
+            current_config = Utils.get_account_config(self.current_account)
+            default_project = current_config.get(
+                "project_key", os.getenv("Default_Project")
+            )
+
             if not default_project or not default_project.strip():
                 raise RuntimeError(
-                    "No project specified and Default_Project environment variable is not set. "
-                    "Please either specify a project or set the Default_Project environment variable."
+                    "No project specified and current account has no default project. "
+                    f"Current account: {self.current_account}"
                 )
-            logger.info(f"✅ Using default project: {default_project}")
+            logger.info(
+                f"✅ Using current account's default project: {default_project} (account: {self.current_account})"
+            )
             return default_project.strip()
 
         try:
@@ -1053,6 +1159,15 @@ class Utils:
 
     def _get_board_id_for_project(self, project_key: str) -> int:
         """Find a board for this project (prefer scrum)."""
+        if not project_key:
+            current_config = Utils.get_account_config(self.current_account)
+            project_key = current_config.get(
+                "project_key", os.getenv("Default_Project")
+            )
+            logger.info(
+                f"📌 Using current account's project for board lookup: {project_key}"
+            )
+
         url = f"{self.base_url}/rest/agile/1.0/board"
         r = self.session.get(
             url, params={"projectKeyOrId": project_key, "maxResults": 50}, timeout=30
@@ -1100,6 +1215,15 @@ class Utils:
     def get_all_sprints_for_project(self, project_key: str) -> str:
         """Get formatted list of sprints for a project."""
         try:
+            if not project_key:
+                current_config = Utils.get_account_config(self.current_account)
+                project_key = current_config.get(
+                    "project_key", os.getenv("Default_Project")
+                )
+                logger.info(
+                    f"📌 Using current account's project for sprint list: {project_key}"
+                )
+
             board_id = self._get_board_id_for_project(project_key)
             if not board_id:
                 return f"No board found for project {project_key}. Use 'backlog' for no sprint."
@@ -1159,6 +1283,15 @@ class Utils:
     def get_default_sprint_for_project(self, project_key: str) -> dict:
         """Get the default sprint for a project (the immediate next sprint after ongoing)."""
         try:
+            if not project_key:
+                current_config = Utils.get_account_config(self.current_account)
+                project_key = current_config.get(
+                    "project_key", os.getenv("Default_Project")
+                )
+                logger.info(
+                    f"📌 Using current account's project for default sprint: {project_key}"
+                )
+
             sprint_info = self.get_all_sprints_for_project(project_key)
 
             if "No board found" in sprint_info:
@@ -1240,6 +1373,16 @@ class Utils:
     def get_sprint_list_implementation(self, project_name_or_key: str) -> dict:
         """Get list of sprints for a project."""
         try:
+            # ✅ FIX: Default to current account's project if empty
+            if not project_name_or_key:
+                current_config = Utils.get_account_config(self.current_account)
+                project_name_or_key = current_config.get(
+                    "project_key", os.getenv("Default_Project")
+                )
+                logger.info(
+                    f"📌 Using current account's project for sprints: {project_name_or_key}"
+                )
+
             project_key = self.resolve_project_key(project_name_or_key)
             sprint_list = self.get_all_sprints_for_project(project_key)
 
@@ -1293,6 +1436,13 @@ class Utils:
         force_update_description_after_create: bool = True,
     ) -> dict:
         """Create a new Jira ticket/issue with validation and automatic reporter matching."""
+        if not project_name_or_key or not project_name_or_key.strip():
+            current_config = Utils.get_account_config(self.current_account)
+            project_name_or_key = current_config.get(
+                "project_key", os.getenv("Default_Project")
+            )
+            logger.info(f"📌 Using current account's project: {project_name_or_key}")
+
         logger.info(
             f"Creating issue with context - assignee: {assignee_email}, summary: {summary}, "
             f"story_points: {story_points}, epic: {epic_key}, slack_user: {slack_username}"

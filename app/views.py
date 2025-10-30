@@ -11,7 +11,7 @@ from openai import OpenAI
 import asyncio
 from qdrant_client import QdrantClient
 from typing import List, Dict
-
+from app.utilities.utils import JIRA_ACCOUNTS
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -31,21 +31,30 @@ class JiraService:
         )
 
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.base_url = os.getenv("JIRA_BASE_URL")
-        self.email = os.getenv("JIRA_EMAIL")
-        self.token = os.getenv("JIRA_TOKEN")
+
+        # ❌ REMOVE THESE - No longer needed, Utils has them
+        # self.base_url = os.getenv("JIRA_BASE_URL")
+        # self.email = os.getenv("JIRA_EMAIL")
+        # self.token = os.getenv("JIRA_TOKEN")
+
         self.default_issue_type = "Task"
         self.default_project = os.getenv("Default_Project")
 
-        # Session for Jira API calls
-        self.session = requests.Session()
-        self.session.auth = (self.email, self.token)
-        self.session.headers.update(
+        # ✅ Create session and utils ONLY - single source of truth
+        session = requests.Session()
+        default_config = Utils.get_account_config("default")
+        session.auth = (default_config["email"], default_config["token"])
+        session.headers.update(
             {"Accept": "application/json", "Content-Type": "application/json"}
         )
 
-        # Initialize utilities
-        self.utils = Utils(self.base_url, self.email, self.token, self.session)
+        # Initialize utilities with default account
+        self.utils = Utils(
+            default_config["base_url"],
+            default_config["email"],
+            default_config["token"],
+            session,
+        )
 
         self.qdrant_client = QdrantClient(
             url=QDRANT_URL,
@@ -58,6 +67,7 @@ class JiraService:
         self.jira_agent = create_react_agent(
             model=self.model,
             tools=[
+                self.detect_jira_account_sync,
                 self.create_issue_sync,
                 self.update_issue_sync,
                 self.delete_issue_sync,
@@ -65,28 +75,115 @@ class JiraService:
                 self.get_project_from_issue_sync,
                 self.get_project_assignable_users_sync,
                 self.get_project_epics_sync,
-                self.search_confluence_knowledge_sync,  # NEW TOOL
+                self.search_confluence_knowledge_sync,
             ],
             prompt=self._get_unified_prompt(),
         )
 
+    def detect_jira_account_sync(self, user_query: str) -> dict:
+        """
+        AI tool to detect which Jira account to use based on user query.
+        If no account mentioned, maintains current account (sticky behavior).
+        Uses word-boundary matching to avoid false positives.
+        """
+        try:
+            import re
+
+            query_lower = user_query.lower()
+            current_account = self.utils.current_account
+            logger.info(f"Current account before detection: {current_account}")
+
+            # Check each account for mentions (using word boundaries)
+            for account_key, config in JIRA_ACCOUNTS.items():
+                account_name = config["name"].lower()
+                project_key = config.get("project_key", "").lower()
+
+                # Use word boundary regex to avoid false matches
+                # \b ensures we match whole words only
+                account_pattern = r"\b" + re.escape(account_key) + r"\b"
+                name_pattern = r"\b" + re.escape(account_name) + r"\b"
+                project_pattern = r"\b" + re.escape(project_key) + r"\b"
+
+                if (
+                    re.search(account_pattern, query_lower)
+                    or re.search(name_pattern, query_lower)
+                    or re.search(project_pattern, query_lower)
+                ):
+                    logger.info(f"🎯 Detected Jira account: {account_key}")
+
+                    # Switch to detected account
+                    switch_success = self.utils.switch_account(account_key)
+
+                    if not switch_success:
+                        logger.warning(f"Failed to switch to account: {account_key}")
+                        return {
+                            "success": False,
+                            "account": current_account,
+                            "error": f"Could not switch to {account_key}, staying on {current_account}",
+                        }
+
+                    return {
+                        "success": True,
+                        "account": account_key,
+                        "account_name": config["name"],
+                        "project_key": config["project_key"],
+                        "message": f"✅ Switched to {config['name']} account",
+                    }
+
+            # No account mentioned - STAY on current account
+            logger.info(
+                f"📌 No account mentioned in query, staying on current account: {current_account}"
+            )
+
+            current_config = JIRA_ACCOUNTS[current_account]
+            return {
+                "success": True,
+                "account": current_account,
+                "account_name": current_config["name"],
+                "project_key": current_config["project_key"],
+                "message": f"Continuing with {current_config['name']} account",
+            }
+
+        except Exception as e:
+            logger.error(f"Error detecting account: {e}")
+            return {
+                "success": False,
+                "account": self.utils.current_account,
+                "error": str(e),
+            }
+
     def _get_unified_prompt(self) -> str:
         """Enhanced unified prompt for intelligent content extraction and Jira operations."""
-        return """
+
+        # Build account list (minimal)
+        accounts = ", ".join(
+            [f"{v['name']} ({v['project_key']})" for k, v in JIRA_ACCOUNTS.items()]
+        )
+
+        return f"""
     You are a Jira assistant that helps create, update, and manage tickets through natural conversation.
+
+    🏢 ACCOUNTS: {accounts}
 
     🔴 CRITICAL RULES
 
+    0. ACCOUNT DETECTION (ALWAYS FIRST):
+    - Call detect_jira_account_sync(user_query) before any Jira operation
+    - Check conversation history to see active account - once set, it STAYS active until explicitly changed
+    - "create ticket in Amac" → switches to Amac, stays on Amac for follow-ups
+    - "delete it" (after creating in Amac) → uses Amac (thread memory)
+    - Only switch when user explicitly mentions different account/project
+
     1. THREAD CONTEXT:
     - "--- 📜 Previous Chat ---" = Historical conversations (reference only)
-    - "--- 💬 Current Thread ---" = Active conversation (check for existing tickets)
+    - "--- 💬 Current Thread ---" = Active conversation (check for existing tickets AND active account)
     - Only look for existing tickets in Current Thread, not Previous Chat
 
     2. ASSIGNEE (MANDATORY):
     - Always call get_project_assignable_users_sync and ask "Who should work on this?"
     - Never auto-assign to: requester, names from examples, names from Previous Chat
     - Only exception: User explicitly says "assign to [name]" or "for [name] to do X" in current message
-    
+
     3. DUPLICATE DETECTION:
     Check Current Thread for similar tickets before creating:
     - Exact matches: Same issue key (AI-123), identical summary
@@ -102,8 +199,12 @@ class JiraService:
 
     📋 TICKET CREATION WORKFLOW
 
+    Step 0: Detect Account
+    - Call detect_jira_account_sync(user_query) first
+    - Check history: if "Using Amac Account" shown → stay on Amac unless told otherwise
+
     Step 1: Check for Existing Tickets
-    - Scan Current Thread for ticket IDs (AI-XXXX format)
+    - Scan Current Thread for ticket IDs (AI-XXXX, DATA-XXX formats)
     - If found: Ask user if they want to update or create new
     - Also check for semantic duplicates (similar issues discussed recently)
 
@@ -136,7 +237,7 @@ class JiraService:
     Conversations:  
     [Include if relevant context exists]
 
-    Use \n for line breaks between sections.
+    Use \\n for line breaks between sections.
 
     📚 KNOWLEDGE SEARCH
 
@@ -155,6 +256,7 @@ class JiraService:
 
     🛠️ TOOLS
 
+    - detect_jira_account_sync(user_query) - Detect account (call FIRST, checks thread memory)
     - search_confluence_knowledge_sync(user_question) - Search docs
     - create_issue_sync(assignee_email, summary, description_text, issue_type_name, slack_username, channel_id, message_id) - Create ticket
     - update_issue_sync(issue_key, ...) - Update ticket
@@ -166,51 +268,70 @@ class JiraService:
 
     Example 1 - Default Flow:
     User: "create ticket for database cleanup"
+    You: [Call detect_jira_account_sync] → default account
     You: [Call get_project_assignable_users_sync]
     You: "Who should work on this? Available: Alice, Bob, Charlie"
     User: "Bob"
     You: [Create ticket assigned to Bob with proper description]
 
-    Example 2 - Explicit Assignment:
+    Example 2 - Account Switch:
+    User: "create ticket in Amac for auth issue"
+    You: [Call detect_jira_account_sync] → Amac account
+    You: "Using Amac Account... Who should work on this?"
+
+    Example 3 - Thread Memory (KEY):
+    --- 💬 Current Thread ---
+    Bot: "Using Amac Account... Created DATA-696"
+    User: "delete it"
+    You: [Call detect_jira_account_sync] → Amac (from thread memory)
+    You: [Delete DATA-696 from Amac]
+
+    Example 4 - Explicit Assignment:
     User: "create ticket for Sarah to fix login issue"
+    You: [Call detect_jira_account_sync]
     You: [Verify Sarah exists, create assigned to Sarah]
 
-    Example 3 - Thread Update:
+    Example 5 - Thread Update:
     --- 💬 Current Thread ---
     "Created AI-123: API integration"
     User: "needs OAuth support"
+    You: [Call detect_jira_account_sync] → same account
     You: "Should I update AI-123 or create new ticket?"
 
-    Example 4 - Previous Chat Separation:
+    Example 6 - Previous Chat Separation:
     --- 📜 Previous Chat ---
     "Created AI-456: Payment work"
     --- 💬 Current Thread ---
     User: "create ticket for refunds"
+    You: [Call detect_jira_account_sync]
     You: [Ask assignee, create NEW ticket]
 
-    Example 5 - Duplicate Detection:
+    Example 7 - Duplicate Detection:
     --- 💬 Current Thread ---
     "Stripe payment failing, card validation errors"
     User: "create ticket for payment gateway issue"
     You: "I found similar discussion about Stripe payment. Same issue or new ticket?"
 
-    Example 6 - Multiple Issues:
+    Example 8 - Multiple Issues:
     User: "We need API integration, database cleanup, UI fixes. John coordinates."
+    You: [Call detect_jira_account_sync]
     You: [Verify John exists]
     You: [Create 1 ticket: "System improvements: API, database, UI" assigned to John]
 
-    Example 7 - Knowledge Question:
+    Example 9 - Knowledge Question:
     User: "How do I deploy to production?"
     You: [Call search_confluence_knowledge_sync]
-    You: "To deploy: [answer from docs]\n📚 Source: <URL|Doc Title>"
+    You: "To deploy: [answer from docs]\\n📚 Source: <URL|Doc Title>"
 
-    Example 8 - Assignee Response Recognition:
+    Example 10 - Assignee Response Recognition:
     You: "Who should work on this? Available: Alice, Bob, Charlie"
     User: "alice" (or "/jira alice" or just "Alice")
     You: [Create ticket assigned to alice immediately]
 
     🎯 KEY BEHAVIORS
 
+    - ALWAYS call detect_jira_account_sync first - it remembers thread's active account
+    - Check conversation history for active account before switching
     - Consolidate multiple issues into one ticket
     - Check Current Thread for duplicates before creating
     - Always ask for assignee (reporter ≠ assignee)
@@ -353,6 +474,15 @@ class JiraService:
             result = create_issue_sync(assignee_email="john", summary="Fix bug", channel_id="C123", message_id="1234.567")
             # Return result["message"] directly!
         """
+        if not project_name_or_key or not project_name_or_key.strip():
+            current_config = Utils.get_account_config(self.utils.current_account)
+            project_name_or_key = current_config.get(
+                "project_key", os.getenv("Default_Project")
+            )
+            logger.info(
+                f"📌 No project specified, using current account's project: {project_name_or_key}"
+            )
+
         return self.utils.create_issue_implementation(
             project_name_or_key,
             summary,
@@ -424,24 +554,35 @@ class JiraService:
             epic_key,
         )
 
-    def get_project_assignable_users_sync(
-        self, project_key: str = os.getenv("Default_Project")
-    ) -> dict:
+    def get_project_assignable_users_sync(self, project_key: str = None) -> dict:
         """
         Get list of users who can be assigned tickets in a project.
         Simple tool for showing available assignees to users.
 
         Args:
-            project_key: Project key like os.getenv("Default_Project"), "BUN", etc. (defaults to os.getenv("Default_Project"))
+            project_key: Project key (if None, uses current account's project)
 
         Returns:
             dict: List of assignable users with their display names
         """
         try:
-            url = f"{self.base_url}/rest/api/3/user/assignable/search"
+            # ✅ If no project specified, use current account's project
+            if not project_key:
+                current_config = Utils.get_account_config(self.utils.current_account)
+                project_key = current_config.get(
+                    "project_key", os.getenv("Default_Project")
+                )
+                logger.info(f"📌 Using current account's project: {project_key}")
+
+            url = f"{self.utils.base_url}/rest/api/3/user/assignable/search"
             params = {"project": project_key, "maxResults": 20}
 
-            response = self.session.get(url, params=params, timeout=30)
+            logger.info(
+                f"Fetching users for project: {project_key} from account: {self.utils.current_account}"
+            )
+            logger.info(f"Using base URL: {self.utils.base_url}")
+
+            response = self.utils.session.get(url, params=params, timeout=30)
 
             if response.status_code == 200:
                 users_data = response.json()
@@ -459,10 +600,13 @@ class JiraService:
                 return {
                     "success": True,
                     "project": project_key,
+                    "account": self.utils.current_account,
                     "users": user_names,
                     "formatted_list": "\n".join([f"• {name}" for name in user_names]),
                 }
             else:
+                logger.error(f"Failed to fetch users. Status: {response.status_code}")
+                logger.error(f"Response: {response.text}")
                 return {
                     "success": False,
                     "error": f"Could not fetch users for project {project_key}",
@@ -473,20 +617,25 @@ class JiraService:
             logger.error(f"Error fetching project users: {e}")
             return {"success": False, "error": str(e), "users": []}
 
-    def get_project_epics_sync(
-        self, project_key: str = os.getenv("Default_Project")
-    ) -> dict:
+    def get_project_epics_sync(self, project_key: str = None) -> dict:
         """
         Get list of epics for a project to allow users to link tickets to epics.
-        Now uses the jira Python library for reliable epic retrieval.
 
         Args:
-            project_key: Project key like os.getenv("Default_Project"), "BUN", etc. (defaults to os.getenv("Default_Project"))
+            project_key: Project key (if None, uses current account's project)
 
         Returns:
             dict: List of epics with their keys and summaries
         """
         try:
+            # ✅ If no project specified, use current account's project
+            if not project_key:
+                current_config = Utils.get_account_config(self.utils.current_account)
+                project_key = current_config.get(
+                    "project_key", os.getenv("Default_Project")
+                )
+                logger.info(f"📌 Using current account's project: {project_key}")
+
             result = self.utils.get_project_epics_implementation(project_key)
 
             # Enhanced error handling with better user guidance
@@ -518,8 +667,6 @@ class JiraService:
                 "project": project_key,
                 "epics": [],
                 "error": str(e),
-                "message": f"Epic search temporarily unavailable. Please provide a specific epic key if you want to link to an epic.",
-                "user_message": f"I'm having trouble accessing epics right now. If you know an epic key (like {project_key}-123), I can link to it directly.",
             }
 
     def delete_issue_sync(self, issue_key: str) -> dict:
@@ -539,6 +686,15 @@ class JiraService:
 
     def get_sprint_list_sync(self, project_name_or_key: str) -> dict:
         """Get available sprints for a project."""
+        if not project_name_or_key:
+            current_config = Utils.get_account_config(self.utils.current_account)
+            project_name_or_key = current_config.get(
+                "project_key", os.getenv("Default_Project")
+            )
+            logger.info(
+                f"📌 No project specified for sprints, using current account's project: {project_name_or_key}"
+            )
+
         return self.utils.get_sprint_list_implementation(project_name_or_key)
 
     def get_project_from_issue_sync(self, issue_key: str) -> dict:
@@ -627,10 +783,13 @@ Return only the grammatically corrected request:"""
             )
             logger.info(f"Original query: {user_query.query}")
             logger.info(f"Refined query: {refined_query}")
-
+            print(JIRA_ACCOUNTS.items(), "....>")
             # Give refined query and context to the agent
             content = f"""
             USER QUERY: {refined_query}
+
+            AVAILABLE JIRA ACCOUNTS:
+            {chr(10).join(f"- {k}: {v['name']}" for k, v in JIRA_ACCOUNTS.items())}
 
             ORIGINAL QUERY: {user_query.query}
 
@@ -644,6 +803,11 @@ Return only the grammatically corrected request:"""
             {chat_history_string}
 
             INSTRUCTIONS:
+            1. FIRST: Call detect_jira_account_sync to identify which account to use
+            2. The account detection will automatically switch credentials
+            3. Then proceed with normal Jira operations using the detected account
+            4. Always confirm which account you're using when creating/updating tickets
+
             - The refined query above has been enhanced with context from the conversation history
             - Use the refined query as your primary instruction, but refer to original and history for additional context
             - IMPORTANT: When creating tickets, ALWAYS pass these parameters to create_issue_sync:
