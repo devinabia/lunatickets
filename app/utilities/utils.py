@@ -391,9 +391,8 @@ class Utils:
             # Build the ticket URL
             ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
 
-
             issue_key = match.group(1)
-            issue_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
+            issue_url = f"{ticket_url}"
             return f"<{issue_url}|{issue_key}>"
 
         text = re.sub(issue_key_pattern, make_issue_clickable, text)
@@ -2201,7 +2200,6 @@ class Utils:
             get_ticket_url = url_dict.get(self.base_url)
             # Build the ticket URL
             ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
-
 
             result = {
                 "success": True,
