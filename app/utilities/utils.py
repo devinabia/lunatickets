@@ -1704,7 +1704,13 @@ class Utils:
             assignee_display_name = (final["fields"]["assignee"] or {}).get(
                 "displayName", "Unassigned"
             )
+            
+            url_dict=  {
+                os.getenv("JIRA_BASE_URL") : os.getenv("JIRA_DOMAIN_URL"),
+                os.getenv("JIRA_ARK_BASE_URL") : os.getenv("JIRA_AKR_DOMAIN_URL")
 
+            }
+            get_ticket_url = url_dict.get("")
             # Build the ticket URL
             ticket_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
 
