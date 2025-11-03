@@ -387,11 +387,11 @@ class Utils:
                 os.getenv("JIRA_BASE_URL"): os.getenv("JIRA_DOMAIN_URL"),
                 os.getenv("JIRA_ARK_BASE_URL"): os.getenv("JIRA_AKR_DOMAIN_URL"),
             }
+            issue_key = match.group(1)
             get_ticket_url = url_dict.get(self.base_url)
             # Build the ticket URL
             ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
 
-            issue_key = match.group(1)
             issue_url = f"{ticket_url}"
             return f"<{issue_url}|{issue_key}>"
 
