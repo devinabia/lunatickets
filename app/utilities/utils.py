@@ -382,6 +382,16 @@ class Utils:
         issue_key_pattern = r"(?<!browse/)(?<!browse%2F)\b([A-Z]+[-_]\d+)\b(?![^<]*>)"
 
         def make_issue_clickable(match):
+
+            url_dict = {
+                os.getenv("JIRA_BASE_URL"): os.getenv("JIRA_DOMAIN_URL"),
+                os.getenv("JIRA_ARK_BASE_URL"): os.getenv("JIRA_AKR_DOMAIN_URL"),
+            }
+            get_ticket_url = url_dict.get(self.base_url)
+            # Build the ticket URL
+            ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
+
+
             issue_key = match.group(1)
             issue_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
             return f"<{issue_url}|{issue_key}>"
@@ -1738,7 +1748,7 @@ class Utils:
                     "displayName", "Unknown"
                 ),
                 "status": (final["fields"]["status"] or {}).get("name", "To Do"),
-                "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
+                "url": f"{ticket_url}",
                 "board_info": board_info,
                 "issue_type": normalized_issue_type,
                 "sprint": sprint_status,
@@ -2184,6 +2194,14 @@ class Utils:
 
             # Extract dates for response
             response_due_date = updated["fields"].get("duedate")
+            url_dict = {
+                os.getenv("JIRA_BASE_URL"): os.getenv("JIRA_DOMAIN_URL"),
+                os.getenv("JIRA_ARK_BASE_URL"): os.getenv("JIRA_AKR_DOMAIN_URL"),
+            }
+            get_ticket_url = url_dict.get(self.base_url)
+            # Build the ticket URL
+            ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
+
 
             result = {
                 "success": True,
@@ -2195,7 +2213,7 @@ class Utils:
                     "displayName", "Unassigned"
                 ),
                 "status": (updated["fields"]["status"] or {}).get("name", "To Do"),
-                "url": f"{self.base_url.rstrip('/')}/browse/{issue_key}",
+                "url": f"{ticket_url}",
                 "updated_fields": updated_fields,
                 "due_date": response_due_date,
             }
