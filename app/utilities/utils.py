@@ -27,13 +27,13 @@ if os.getenv("ORG") == "INABIA":
             "project_key": os.getenv("Default_Project"),
             "description": "Main Jira workspace for general projects",
         },
-        "amac": {
-            "name": "Amac Account",
-            "base_url": os.getenv("JIRA_AMAC_BASE_URL"),
-            "email": os.getenv("JIRA_AMAC_EMAIL"),
-            "token": os.getenv("JIRA_AMAC_TOKEN"),
-            "project_key": os.getenv("JIRA_AMAC_PROJECT", "AMAC"),
-            "description": "Amac-specific Jira workspace",
+        "ark": {
+            "name": "ARK Account",
+            "base_url": os.getenv("JIRA_ARK_BASE_URL"),
+            "email": os.getenv("JIRA_ARK_EMAIL"),
+            "token": os.getenv("JIRA_ARK_TOKEN"),
+            "project_key": os.getenv("JIRA_ARK_PROJECT", "AB"),
+            "description": "ARK-specific Jira workspace",
         },
     }
 else:
@@ -70,13 +70,13 @@ class Utils:
         Updates base_url, credentials, and session authentication.
 
         Args:
-            account_key: Account identifier ('default', 'amac', 'client_x', etc.)
+            account_key: Account identifier ('default', 'ark', etc.)
 
         Returns:
             bool: True if switch successful, False otherwise
 
         Examples:
-            utils.switch_account("amac")  # Switch to Amac account
+            utils.switch_account("ark")  # Switch to Ark account
             utils.switch_account("default")  # Switch back to default
         """
         try:

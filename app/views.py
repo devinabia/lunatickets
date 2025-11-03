@@ -266,9 +266,9 @@ class JiraService:
         You: [User said "create new" → Create NEW ticket, ask for assignee]
 
         Example 5 - Thread Memory:
-        Current Thread: "Created DATA-696 in Amac Account"
+        Current Thread: "Created DATA-696 in Ark Account"
         User: "delete it"
-        You: [Stay on Amac, delete DATA-696]
+        You: [Stay on Ark, delete DATA-696]
 
         🎯 KEY BEHAVIORS
 
