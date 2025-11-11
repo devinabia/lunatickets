@@ -406,48 +406,103 @@ class Utils:
 
         return text
 
-    # ========================================
-    # JIRA API UTILITIES (PURE UTILITIES)
-    # ========================================
-
     def text_to_adf(self, text: str) -> dict:
-        """Convert plain text to Atlassian Document Format."""
+        """Convert text with **bold** markers to ADF with proper formatting."""
         if not text:
             return {"type": "doc", "version": 1, "content": [{"type": "paragraph"}]}
 
-        parts = text.split("\n")
-        content = []
-        for i, chunk in enumerate(parts):
-            if chunk:
-                content.append({"type": "text", "text": chunk})
-            if i < len(parts) - 1:
-                content.append({"type": "hardBreak"})
+        import re
 
-        return {
-            "type": "doc",
-            "version": 1,
-            "content": [{"type": "paragraph", "content": content}],
-        }
+        lines = text.split("\n")
+        doc_content = []
+
+        # Heading keywords - these should become bold in regular paragraphs
+        heading_keywords = [
+            "What is the request?",
+            "Why is this important?",
+            "When can this ticket be closed",
+            "Conversations:",
+            "Definition of Done",
+        ]
+
+        for line in lines:
+            if not line.strip():
+                continue
+
+            # Check if this line should be a heading (starts with a heading keyword)
+            is_heading_line = False
+            for keyword in heading_keywords:
+                if keyword.lower() in line.lower():
+                    is_heading_line = True
+                    break
+
+            # Build paragraph content
+            paragraph_content = []
+
+            # Match **text** for bold (non-greedy to handle multiple bold sections)
+            pattern = r"\*\*([^\*]+)\*\*"
+            last_end = 0
+
+            for match in re.finditer(pattern, line):
+                # Add text before bold
+                if match.start() > last_end:
+                    regular_text = line[last_end : match.start()]
+                    if regular_text:
+                        paragraph_content.append({"type": "text", "text": regular_text})
+
+                # Add bold text (without the ** markers)
+                bold_text = match.group(1)
+                paragraph_content.append(
+                    {"type": "text", "text": bold_text, "marks": [{"type": "strong"}]}
+                )
+
+                last_end = match.end()
+
+            # Add remaining text
+            if last_end < len(line):
+                remaining_text = line[last_end:]
+                if remaining_text:
+                    paragraph_content.append({"type": "text", "text": remaining_text})
+
+            # If no bold markers found, add whole line
+            if not paragraph_content:
+                # Check if the line itself should be bold (heading line without ** markers)
+                if is_heading_line:
+                    paragraph_content.append(
+                        {"type": "text", "text": line, "marks": [{"type": "strong"}]}
+                    )
+                else:
+                    paragraph_content.append({"type": "text", "text": line})
+
+            # Add as paragraph
+            doc_content.append({"type": "paragraph", "content": paragraph_content})
+
+        if not doc_content:
+            doc_content = [{"type": "paragraph", "content": []}]
+
+        return {"type": "doc", "version": 1, "content": doc_content}
 
     def resolve_project_key(self, name_or_key: str) -> str:
         """
-        Return project key by searching both Jira projects and Confluence spaces.
 
-        If name_or_key is empty or None, returns the default project from environment.
+        # ========================================
+           Return project key by searching both Jira projects and Confluence spaces.
 
-        Search Priority:
-        1. Use default project if name_or_key is empty
-        2. Exact Jira project key match
-        3. Exact Jira project name match
-        4. Partial Jira project name match
-        5. Search Confluence spaces and find linked Jira project
+            If name_or_key is empty or None, returns the default project from environment.
 
-        Examples:
-            - "" -> "AI" (uses default project)
-            - None -> "AI" (uses default project)
-            - "DATA" -> "DATA" (exact key match)
-            - "Customers" -> "CUST" (exact name match)
-            - "data squad" -> "DATA" (found via Confluence space)
+            Search Priority:
+            1. Use default project if name_or_key is empty
+            2. Exact Jira project key match
+            3. Exact Jira project name match
+            4. Partial Jira project name match
+            5. Search Confluence spaces and find linked Jira project
+
+            Examples:
+                - "" -> "AI" (uses default project)
+                - None -> "AI" (uses default project)
+                - "DATA" -> "DATA" (exact key match)
+                - "Customers" -> "CUST" (exact name match)
+                - "data squad" -> "DATA" (found via Confluence space)
         """
         # ========================================
         # STEP 0: Handle empty/None with default
@@ -959,26 +1014,16 @@ class Utils:
         return r.json()
 
     def update_description(self, issue_key: str, description_text: str) -> None:
-        """Update issue description."""
+        """Update issue description with proper ADF formatting."""
         if not description_text or not description_text.strip():
             return
 
         try:
+            print(description_text)
             url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
-            payload = {
-                "fields": {
-                    "description": {
-                        "type": "doc",
-                        "version": 1,
-                        "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [{"type": "text", "text": description_text}],
-                            }
-                        ],
-                    }
-                }
-            }
+
+            # ✅ USE text_to_adf instead of plain text
+            payload = {"fields": {"description": self.text_to_adf(description_text)}}
 
             r = self.session.put(url, json=payload, timeout=20)
             if r.ok:
@@ -1076,10 +1121,10 @@ class Utils:
             return "customfield_10014"
 
     def get_project_epics_implementation(self, project_key: str) -> dict:
-        """Get epics using the jira Python library for better reliability."""
+        """Get active epics (not Done) using the jira Python library."""
         try:
             logger.info(
-                f"=== Fetching epics for project {project_key} using jira library ==="
+                f"=== Fetching active epics for project {project_key} using jira library ==="
             )
 
             # Import the jira library
@@ -1090,15 +1135,19 @@ class Utils:
                 server=self.base_url, basic_auth=(self.email, self.token)
             )
 
-            # Search for epics using JQL - same as your working script
+            # ✅ UPDATED: Exclude Done epics in the JQL query
             jql_query = (
-                f"project = {project_key} AND issuetype = Epic ORDER BY created DESC"
+                f"project = {project_key} AND issuetype = Epic "
+                f"AND status NOT IN (Done, Closed, Resolved, Cancelled) "
+                f"ORDER BY created DESC"
             )
 
             # Search for epics (limit to 50 for performance)
             epic_issues = jira_client.search_issues(jql_query, maxResults=50)
 
-            logger.info(f"Found {len(epic_issues)} epics in project {project_key}")
+            logger.info(
+                f"Found {len(epic_issues)} active epics in project {project_key}"
+            )
 
             if epic_issues:
                 epics = []
@@ -1123,17 +1172,17 @@ class Utils:
                     "project": project_key,
                     "epics": epics,
                     "formatted_list": "\n".join(formatted_list),
-                    "message": f"Found {len(epics)} epics in {project_key}",
+                    "message": f"Found {len(epics)} active epics in {project_key}",
                     "method_used": "jira_library",
                 }
             else:
-                logger.info(f"No epics found in project {project_key}")
+                logger.info(f"No active epics found in project {project_key}")
                 return {
                     "success": True,
                     "project": project_key,
                     "epics": [],
-                    "formatted_list": f"No epics found in project {project_key}.\n\nTo create an epic, go to your Jira project and create a new issue with type 'Epic'.",
-                    "message": f"No epics found in {project_key}. You may need to create some epics first.",
+                    "formatted_list": f"No active epics found in project {project_key}.\n\nTo create an epic, go to your Jira project and create a new issue with type 'Epic'.",
+                    "message": f"No active epics found in {project_key}. You may need to create some epics first.",
                     "method_used": "jira_library",
                 }
 
@@ -1161,10 +1210,6 @@ class Utils:
                 "message": f"Cannot automatically list epics right now. You can specify epic keys manually.",
                 "method_used": "fallback",
             }
-
-    # ========================================
-    # SPRINT UTILITIES
-    # ========================================
 
     def _get_board_id_for_project(self, project_key: str) -> int:
         """Find a board for this project (prefer scrum)."""
@@ -1815,28 +1860,6 @@ class Utils:
         if not users:
             raise RuntimeError(f"No Jira user found for '{query}'.")
         return users[0]["accountId"]
-
-    @staticmethod
-    def extract_issue_key_from_response(response_data: str) -> str:
-        """Extract issue key from Jira response data."""
-        try:
-            if not response_data:
-                return ""
-
-            # Look for patterns like AI-123, PROJ-456, etc.
-            import re
-
-            pattern = r"\b([A-Z]+[-_]\d+)\b"
-            matches = re.findall(pattern, response_data)
-
-            if matches:
-                # Return the first match (most likely the created/updated issue)
-                return matches[0]
-
-            return ""
-        except Exception as e:
-            logger.error(f"Error extracting issue key: {e}")
-            return ""
 
     def update_issue(
         self,

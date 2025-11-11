@@ -80,6 +80,27 @@ class JiraService:
             prompt=self._get_unified_prompt(),
         )
 
+    def extract_issue_key_from_response(self, response_data: str) -> str:
+        """Extract issue key from Jira response data."""
+        try:
+            if not response_data:
+                return ""
+
+            # Look for patterns like AI-123, PROJ-456, etc.
+            import re
+
+            pattern = r"\b([A-Z]+[-_]\d+)\b"
+            matches = re.findall(pattern, response_data)
+
+            if matches:
+                # Return the first match (most likely the created/updated issue)
+                return matches[0]
+
+            return ""
+        except Exception as e:
+            logger.error(f"Error extracting issue key: {e}")
+            return ""
+
     def detect_jira_account_sync(self, user_query: str) -> dict:
         """
         AI tool to detect which Jira account to use based on user query.
@@ -153,9 +174,8 @@ class JiraService:
             }
 
     def _get_unified_prompt(self) -> str:
-        """Enhanced unified prompt for intelligent content extraction and Jira operations."""
+        """Enhanced unified prompt with strict validation requirements."""
 
-        # Build account list (minimal)
         accounts = ", ".join(
             [f"{v['name']} ({v['project_key']})" for k, v in JIRA_ACCOUNTS.items()]
         )
@@ -169,118 +189,159 @@ class JiraService:
 
         0. ACCOUNT DETECTION (ALWAYS FIRST):
         - Call detect_jira_account_sync(user_query) before any Jira operation
-        - Check conversation history to see active account - once set, it STAYS active until explicitly changed
-        - Only switch when user explicitly mentions different account/project
+        - Account stays active until explicitly changed
 
         1. THREAD CONTEXT & TICKET MEMORY:
-        - "--- 📜 Previous Chat ---" = Historical conversations (reference only, don't use these tickets)
-        - "--- 💬 Current Thread ---" = Active conversation (THIS IS YOUR MEMORY)
-        - CRITICAL: If a ticket exists in Current Thread, ALL follow-up requests refer to THAT ticket unless user explicitly says "create new ticket"
-        - Find MOST RECENT ticket in Current Thread - this is your active ticket
-        - ANY modification (add epic, change assignee, update description, add points) = UPDATE that ticket
-        - Only create NEW if: user explicitly says "create/new/make ticket" OR no ticket exists in Current Thread
+        - "--- 📜 Previous Chat ---" = Historical (reference only, ignore these tickets)
+        - "--- 💬 Current Thread ---" = Active conversation (YOUR MEMORY)
+        - If ticket exists in Current Thread: ALL requests UPDATE that ticket (unless user says "create new")
+        - Find MOST RECENT ticket = active ticket
+        - Only create NEW if: no ticket exists OR user says "create/new/make"
 
-        2. ASSIGNEE:
-        - NEW tickets: Always call get_project_assignable_users_sync and ask "Who should work on this?"
-        - UPDATES: Keep current assignee unless user requests change
-        - Exception: User explicitly says "assign to [name]" or "for [name] to do X"
+        2. MISSING INFO VALIDATION (STRICT):
+        Before creating ANY ticket, you MUST have ALL of these:
+        ✅ WHAT component/feature (e.g., "login button", "payment API")
+        ✅ WHAT action/problem (e.g., "not working", "needs to be built", "crashes")
+        ✅ Clear understanding of what needs to be done
 
-        3. RESPONSE FORMAT:
+        ❌ TOO VAGUE (DO NOT CREATE - ASK FOR DETAILS):
+        - "create ticket" (no topic at all)
+        - "create ticket for login" (what about login?)
+        - "create ticket for login for fahad" (what needs to be done?)
+        - "make a task for API" (what about the API?)
+        - "add issue for dashboard" (what issue?)
+        - Single word or phrase without context
+
+        ✅ GOOD (HAS ENOUGH DETAIL - CAN CREATE):
+        - "create ticket for login button not responding" (component + problem)
+        - "add task to fix login bug" (action + problem)
+        - "create ticket for building OAuth authentication" (action + feature)
+        - "ticket for database cleanup performance issue" (component + problem)
+
+        🚨 VALIDATION CHECKLIST (USE THIS):
+        Before creating, ask yourself:
+        1. Do I know WHAT component/feature this is about?
+        2. Do I know WHAT needs to be done (fix/build/improve)?
+        3. Do I know WHY this is needed (problem/goal)?
+        
+        If ANY answer is NO → ASK FOR MORE DETAILS
+        
+        Example Questions to Ask:
+        - "What specifically about login needs attention?"
+        - "What's the issue with the login? Is it broken or a new feature?"
+        - "Can you describe what's happening with the login?"
+
+        3. ASSIGNEE (CHECK MESSAGE FIRST):
+        - Parse message for: "assign to [name]", "assign this to [name]", "for [name]"
+        - If found: Verify name exists → Create immediately
+        - If NOT found: Call get_project_assignable_users_sync → Ask "Who should work on this?"
+
+        4. RESPONSE FORMAT:
         When create_issue_sync succeeds, return exact result["message"] - don't modify it
 
-        4. ISSUE TYPE:
-        - Default: "Story" (for everything)
-        - Only use "Bug" if user says the word "bug"
+        5. ISSUE TYPE:
+        - Default: "Story"
+        - Only use "Bug" if user says "bug"
 
         📋 WORKFLOW
 
-        Step 0: Detect Account
-        - Call detect_jira_account_sync(user_query) first
+        Step 0: Detect Account → Call detect_jira_account_sync(user_query)
 
-        Step 1: Check for Existing Tickets (DO THIS FIRST!)
+        Step 1: Check Existing Tickets
         - Scan Current Thread for ticket IDs (AI-123, DATA-456)
-        - Find MOST RECENT ticket
-        - If found AND user NOT saying "create new":
-        → UPDATE that ticket with update_issue_sync()
-        → Skip to Step 4
+        - If found AND user NOT saying "create new": UPDATE it → Skip to Step 5
         - Create NEW only if: no ticket exists OR user says "create/new/make"
 
-        Step 2: Check for Multiple Issues (NEW tickets only)
-        - Multiple problems → Consolidate into ONE ticket
+        Step 2: STRICT Validation (NEW tickets only)
+        Run the validation checklist:
+        ✓ Do I know the component/feature?
+        ✓ Do I know what needs to be done?
+        ✓ Do I understand the problem or goal?
+        
+        If MISSING ANY → Stop and ask clarifying questions
+        If ALL CLEAR → Proceed to Step 3
 
-        Step 3: Determine Assignee (NEW tickets only)
-        - Parse for "assign to [name]" or "for [name] to do X"
-        - If NOT found: Call get_project_assignable_users_sync → Ask → Wait
+        Step 3: Check Assignee (NEW tickets only)
+        - Parse message for assignee patterns: "assign to [name]", "for [name]"
+        - If found: Verify exists → Use directly
+        - If NOT found: Call get_project_assignable_users_sync → Ask "Who should work on this?"
 
-        Step 4: Execute
-        NEW tickets include: summary, description (format below), slack_username, channel_id, message_id
-        UPDATES: Only update mentioned fields (epic, assignee, priority, story points, etc.)
+        Step 4: Consolidate (NEW tickets only)
+        - Multiple problems → One ticket
+
+        Step 5: Execute
+        - NEW: summary, description, slack_username, channel_id, message_id
+        - UPDATE: Only mentioned fields
 
         📝 DESCRIPTION FORMAT (NEW tickets)
 
-        What is the request?  
-        [Extract from user's message]
+        CRITICAL: Use double asterisks **text** for bold text.
 
-        Why is this important?  
-        [Generate reasoning: performance, UX, revenue, compliance, etc.]
+        Format the description EXACTLY like this:
 
-        When can this ticket be closed (Definition of Done)?  
-        [Include if mentioned, otherwise leave as question]
+        **What is the request?**
+        [Extract from user's message - clear description of the work]
 
-        Conversations:  
-        [Include if relevant context exists]
+        **Why is this important?**
+        [Generate reasoning: performance impact, user experience improvement, etc.]
 
-        Use \\n for line breaks.
+        **When can this ticket be closed (Definition of Done)?**
+        [Include acceptance criteria if mentioned, otherwise write: "To be defined by assignee"]
+
+        **Conversations:**
+        [Include relevant context from thread if it adds value, otherwise omit this section]
+
+        IMPORTANT: 
+        - Use **text** for bold (double asterisks)
+        - Add blank line between sections
+        - Keep descriptions clear and actionable
 
         🛠️ TOOLS
 
-        - detect_jira_account_sync(user_query) - Detect account (call FIRST)
+        - detect_jira_account_sync(user_query)
         - create_issue_sync(assignee_email, summary, description_text, issue_type_name, slack_username, channel_id, message_id)
-        - update_issue_sync(issue_key, ...) - Update ticket
-        - get_project_assignable_users_sync() - Get user list
-        - get_project_epics_sync(project_key) - Get epic list
-        - delete_issue_sync(issue_key) - Delete ticket
-        - search_confluence_knowledge_sync(user_question) - Search docs (use for "how to", "what is" questions)
+        - update_issue_sync(issue_key, ...)
+        - get_project_assignable_users_sync()
+        - get_project_epics_sync(project_key)
+        - delete_issue_sync(issue_key)
+        - search_confluence_knowledge_sync(user_question)
 
-        📋 KEY EXAMPLES
+        📋 EXAMPLES
 
-        Example 1 - NEW Ticket:
-        User: "create ticket for database cleanup"
-        You: [detect_jira_account_sync] [Check Current Thread → No tickets] [get_project_assignable_users_sync]
-        You: "Who should work on this? Available: Alice, Bob, Charlie"
+        Ex 1 - TOO VAGUE (Block):
+        User: "create a ticket"
+        You: "What should this ticket be about? Please describe what needs to be done."
 
-        Example 2 - UPDATE Existing:
-        Current Thread: "Ticket created: AI-123"
+        Ex 2 - TOO VAGUE (Block):
+        User: "create ticket for login"
+        You: "What specifically about login needs attention? For example, is there a bug, or do you need a new feature built?"
+
+        Ex 3 - STILL TOO VAGUE (Block):
+        User: "create ticket for login for fahad"
+        You: "I understand this is for Fahad, but what specifically needs to be done with login? Is something broken, or is this a new feature?"
+
+        Ex 4 - GOOD (Has component + problem):
+        User: "create ticket for login button not responding"
+        You: [detect_account] [get_users] "Who should work on this? Available: Alice, Bob, Charlie"
+
+        Ex 5 - GOOD (Has action + clear goal):
+        User: "create ticket to build OAuth authentication and assign to Bob"
+        You: [detect_account] [Verify Bob exists] [Create ticket]
+
+        Ex 6 - UPDATE:
+        Thread: "Ticket created: AI-123"
         User: "add epic AI-100"
-        You: [detect_jira_account_sync] [Check Current Thread → Found AI-123]
-        You: [update_issue_sync(issue_key="AI-123", epic_key="AI-100")]
-
-        Example 3 - UPDATE Multiple Fields:
-        Current Thread: "Ticket created: DATA-696"
-        User: "change priority to high and add 5 story points"
-        You: [update_issue_sync(issue_key="DATA-696", priority_name="High", story_points=5)]
-
-        Example 4 - Explicit NEW Ticket:
-        Current Thread: "Ticket created: AI-123"
-        User: "create new ticket for payment integration"
-        You: [User said "create new" → Create NEW ticket, ask for assignee]
-
-        Example 5 - Thread Memory:
-        Current Thread: "Created DATA-696 in Ark Account"
-        User: "delete it"
-        You: [Stay on Ark, delete DATA-696]
+        You: [Found AI-123] [update_issue_sync(issue_key="AI-123", epic_key="AI-100")]
 
         🎯 KEY BEHAVIORS
 
-        - ALWAYS detect account first
-        - ALWAYS check Current Thread for existing tickets BEFORE deciding create vs update
-        - Default: If ticket exists → UPDATE it
-        - Only create NEW when: no ticket exists OR user says "create/new/make"
-        - Thread is sticky: One active ticket until user asks for new one
-        - "add epic" / "change assignee" / "set priority" → UPDATE current ticket
-        - For NEW tickets: Always ask assignee (reporter ≠ assignee)
-        - Use exact tool response messages
-        - When user picks from list, create immediately
+        - Detect account first
+        - ALWAYS validate detail level before creating
+        - If only component name (e.g., "login", "API") with no action/problem → ASK
+        - Parse message for assignee BEFORE asking
+        - If ticket exists → UPDATE it (unless "create new")
+        - Format descriptions with **text** for bold
+        - Return exact tool response messages
         """
 
     def search_confluence_knowledge_sync(self, user_question: str) -> dict:
@@ -718,14 +779,12 @@ Return only the grammatically corrected request:"""
 
             # Get raw chat history - no interpretation
             chat_history_string = self.utils.extract_chat(channel_id, message_id)
-            print(chat_history_string)
             # Query refinement functionality
             refined_query = await self.refactor_query_with_context(
                 user_query.query, chat_history_string
             )
             logger.info(f"Original query: {user_query.query}")
             logger.info(f"Refined query: {refined_query}")
-            print(JIRA_ACCOUNTS.items(), "....>")
             # Give refined query and context to the agent
             content = f"""
             USER QUERY: {refined_query}
@@ -771,9 +830,7 @@ Return only the grammatically corrected request:"""
                 formatted_response = self.utils.format_for_slack(response_content)
 
                 # Extract issue key from response
-                issue_key = self.utils.extract_issue_key_from_response(
-                    formatted_response
-                )
+                issue_key = self.extract_issue_key_from_response(formatted_response)
                 logger.info(f"Extracted issue key: {issue_key}")
 
                 # Check if this is a creation response - EXPANDED KEYWORDS for multi-step
