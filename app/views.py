@@ -12,6 +12,7 @@ import asyncio
 from qdrant_client import QdrantClient
 from typing import List, Dict
 from app.utilities.utils import JIRA_ACCOUNTS
+from app.utilities.story_points_utils import JiraSlackUtils
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -31,16 +32,9 @@ class JiraService:
         )
 
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        # ❌ REMOVE THESE - No longer needed, Utils has them
-        # self.base_url = os.getenv("JIRA_BASE_URL")
-        # self.email = os.getenv("JIRA_EMAIL")
-        # self.token = os.getenv("JIRA_TOKEN")
-
         self.default_issue_type = "Task"
         self.default_project = os.getenv("Default_Project")
 
-        # ✅ Create session and utils ONLY - single source of truth
         session = requests.Session()
         default_config = Utils.get_account_config("default")
         session.auth = (default_config["email"], default_config["token"])
@@ -48,12 +42,17 @@ class JiraService:
             {"Accept": "application/json", "Content-Type": "application/json"}
         )
 
-        # Initialize utilities with default account
         self.utils = Utils(
             default_config["base_url"],
             default_config["email"],
             default_config["token"],
             session,
+        )
+
+        JiraSlackUtils.init(
+            accounts=JIRA_ACCOUNTS,
+            default_key="default",
+            slack_bot_token=os.getenv("SLACK_BOT_TOKEN"),
         )
 
         self.qdrant_client = QdrantClient(
@@ -63,7 +62,6 @@ class JiraService:
             check_compatibility=False,
         )
 
-        # Create single agent with all CRUD tools + Confluence search
         self.jira_agent = create_react_agent(
             model=self.model,
             tools=[
@@ -79,6 +77,36 @@ class JiraService:
             ],
             prompt=self._get_unified_prompt(),
         )
+
+    def run_sprint_storypoint_check(self):
+        """
+        Automatically loops through all recent projects → boards → sprints
+        and posts Slack reminders for missing Story Points.
+        """
+        print("🔹 Running Sprint Story Point Check...")
+
+        # ✅ uses initialized JiraSlackUtils directly
+        projectList = JiraSlackUtils.getRecentProject()
+
+        for prj in projectList:
+            key = prj["Key"]
+            print(f"➡️  Project: {key}")
+
+            boardId = JiraSlackUtils.get_first_board_for_project(key)
+            print(f"   ↳ Board ID: {boardId}")
+
+            if boardId == 0:
+                continue
+
+            sprint_id = JiraSlackUtils.get_upcoming_sprint_id(boardId)
+            print(f"   ↳ Upcoming Sprint ID: {sprint_id}")
+
+            if sprint_id == 0:
+                continue
+
+            JiraSlackUtils.getUpComingSprintDetails(sprint_id)
+
+        print("✅ Sprint Story Point Check Completed.")
 
     def extract_issue_key_from_response(self, response_data: str) -> str:
         """Extract issue key from Jira response data."""

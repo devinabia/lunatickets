@@ -637,6 +637,12 @@ class BotRouter:
             "/dump-data", self.qdrant_service.dump_all_data_to_qdrant, methods=["POST"]
         )
 
+        self.router.add_api_route(
+            "/storypoints-job",
+            self.jira_service.run_sprint_storypoint_check,
+            methods=["POST"],
+        )
+
     async def handle_jira_query(self, request: Request):
         try:
             if (

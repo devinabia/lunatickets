@@ -32,3 +32,4 @@ APScheduler==3.11.0
 beautifulsoup4==4.14.2
 qdrant-client==1.15.1
 jira==3.10.5
+RapidFuzz==3.14.3
