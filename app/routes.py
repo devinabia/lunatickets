@@ -815,6 +815,17 @@ def create_app():
     bot_router = BotRouter()
     app.include_router(bot_router.router, tags=["Bot"])
 
+    @app.get("/slack-json", tags=["Slack"])
+    async def getJsonFile():
+        import json
+
+        JSON_PATH = "slack_message.json"
+
+        if not os.path.isfile(JSON_PATH):
+            return {"status": "401", "message": "no file found"}
+        with open(JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)  # FastAPI auto-serializes to JSON
+
     @app.post("/jira-webhook", tags=["Slack"])
     async def jira_webhook(request: Request):
         LAST_STATUS: Dict[str, str] = {}
