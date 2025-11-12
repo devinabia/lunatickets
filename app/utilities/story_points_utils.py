@@ -8,7 +8,9 @@ from jira import JIRA
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from rapidfuzz import process, fuzz
+from dotenv import load_dotenv
 
+load_dotenv()
 
 # -------------------------------
 # Define accounts OUTSIDE the class
