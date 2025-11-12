@@ -13,24 +13,36 @@ from rapidfuzz import process, fuzz
 # -------------------------------
 # Define accounts OUTSIDE the class
 # -------------------------------
-JIRA_ACCOUNTS = {
-    "default": {
-        "name": "Default Account",
-        "base_url": os.getenv("JIRA_BASE_URL"),
-        "email": os.getenv("JIRA_EMAIL"),
-        "token": os.getenv("JIRA_TOKEN"),
-        "project_key": os.getenv("Default_Project"),
-        "description": "Main Jira workspace for general projects",
-    },
-    "ark": {
-        "name": "ARK Account",
-        "base_url": os.getenv("JIRA_ARK_BASE_URL"),
-        "email": os.getenv("JIRA_ARK_EMAIL"),
-        "token": os.getenv("JIRA_ARK_TOKEN"),
-        "project_key": os.getenv("JIRA_ARK_PROJECT", "AB"),
-        "description": "ARK-specific Jira workspace",
-    },
-}
+if os.getenv("ORG") == "INABIA":
+    JIRA_ACCOUNTS = {
+        "default": {
+            "name": "Default Account",
+            "base_url": os.getenv("JIRA_BASE_URL"),
+            "email": os.getenv("JIRA_EMAIL"),
+            "token": os.getenv("JIRA_TOKEN"),
+            "project_key": os.getenv("Default_Project"),
+            "description": "Main Jira workspace for general projects",
+        },
+        "ark": {
+            "name": "ARK Account",
+            "base_url": os.getenv("JIRA_ARK_BASE_URL"),
+            "email": os.getenv("JIRA_ARK_EMAIL"),
+            "token": os.getenv("JIRA_ARK_TOKEN"),
+            "project_key": os.getenv("JIRA_ARK_PROJECT", "AB"),
+            "description": "ARK-specific Jira workspace",
+        },
+    }
+else:
+    JIRA_ACCOUNTS = {
+        "default": {
+            "name": "Default Account",
+            "base_url": os.getenv("JIRA_BASE_URL"),
+            "email": os.getenv("JIRA_EMAIL"),
+            "token": os.getenv("JIRA_TOKEN"),
+            "project_key": os.getenv("Default_Project"),
+            "description": "Main Jira workspace for general projects",
+        }
+    }
 
 
 class JiraSlackUtils:
