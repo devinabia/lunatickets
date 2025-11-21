@@ -1764,16 +1764,29 @@ class Utils:
                 os.getenv("JIRA_ARK_BASE_URL"): os.getenv("JIRA_ARK_DOMAIN_URL"),
             }
             get_ticket_url = url_dict.get(self.base_url)
-            # Build the ticket URL
             ticket_url = f"{get_ticket_url.rstrip('/')}/browse/{issue_key}"
+
+            # 🆕 Get epic list if no epic was provided
+            epic_list_text = None
+            if not epic_key:
+                try:
+                    epic_result = self.get_project_epics_implementation(project_key)
+                    if epic_result.get("success") and epic_result.get("epics"):
+                        epic_list_text = epic_result.get("formatted_list", "")
+                        logger.info(
+                            f"Retrieved {len(epic_result['epics'])} epics for display"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not fetch epic list: {e}")
 
             # 🆕 Format the strict response
             formatted_response = self.format_ticket_creation_response(
                 issue_key=issue_key,
                 assignee_name=assignee_display_name,
-                epic_key=epic_key,  # Will be None if not provided
+                epic_key=epic_key,
                 jira_url=ticket_url,
                 project_key=project_key,
+                epic_list=epic_list_text,  # Pass epic list
             )
 
             result = {
@@ -2601,6 +2614,7 @@ class Utils:
         epic_key: str = None,
         jira_url: str = None,
         project_key: str = str(os.getenv("Default_Project")),
+        epic_list: str = None,
     ) -> str:
         """
         Format a strict, consistent ticket creation response with Slack hyperlink formatting.
@@ -2619,21 +2633,28 @@ class Utils:
         if not jira_url:
             jira_url = f"{self.base_url.rstrip('/')}/browse/{issue_key}"
 
-        # Format epic status
-        if epic_key:
-            epic_status = epic_key
-        else:
-            epic_status = "unknown - would you like a list of epics to choose from?"
-
-        # Build the strict response format with Slack hyperlink and spacing
-        # Slack hyperlink format: <URL|Display Text>
+        # Build the response
         response = (
             f"Ticket created: <{jira_url}|{issue_key}>\n"
-            f"\n"  # Add blank line for spacing
+            f"\n"
             f"Assigned to: {assignee_name}\n"
-            f"\n"  # Add blank line for spacing
-            f"Epic: {epic_status}"
         )
+
+        # Format epic status
+        if epic_key:
+            # Epic was provided - show it
+            response += f"\n"
+            response += f"Epic: {epic_key}"
+        elif epic_list:
+            # No epic provided but we have epic list - show only the list
+            response += f"\n"
+            response += f"Available epics:\n{epic_list}"
+        else:
+            # No epic and no list - show prompt
+            response += f"\n"
+            response += (
+                f"Epic: unknown - would you like a list of epics to choose from?"
+            )
 
         return response
 
