@@ -104,6 +104,200 @@ class JiraSlackUtils:
             )
 
     @classmethod
+    def _collect_notification_data(cls, issue, notifications_by_channel):
+        """
+        Collect issue data for batched notifications.
+        Groups issues by channel and then by user (Jira name).
+
+        Args:
+            issue: JIRA Issue object
+            notifications_by_channel: Dict to collect notification data
+        """
+        try:
+            f = issue.fields
+            iss_key = issue.key
+
+            # Get channel for this issue
+            channel_id = cls.searchInJsonFile(iss_key)
+            if channel_id is None:
+                logger.debug(f"  ℹ️ No Slack channel mapping found for {iss_key}")
+                return
+
+            # Get assignee and reporter names
+            people_to_notify = set()
+
+            assignee_name = (
+                getattr(f.assignee, "displayName", None)
+                if getattr(f, "assignee", None)
+                else None
+            )
+            reporter_name = (
+                getattr(f.reporter, "displayName", None)
+                if getattr(f, "reporter", None)
+                else None
+            )
+
+            if assignee_name:
+                people_to_notify.add(assignee_name)
+            if reporter_name:
+                people_to_notify.add(reporter_name)
+
+            # If no assignee or reporter, track this separately
+            if len(people_to_notify) == 0:
+                people_to_notify.add("__NO_ASSIGNEE__")
+
+            # Initialize channel dict if needed
+            if channel_id not in notifications_by_channel:
+                notifications_by_channel[channel_id] = {}
+
+            # Add issue to each person's list
+            for person_name in people_to_notify:
+                if person_name not in notifications_by_channel[channel_id]:
+                    notifications_by_channel[channel_id][person_name] = []
+
+                notifications_by_channel[channel_id][person_name].append(issue)
+
+        except Exception as e:
+            logger.error(f"Error collecting notification data for {issue.key}: {e}")
+
+    @classmethod
+    def _send_batched_notifications(cls, notifications_by_channel):
+        """
+        Send batched Slack notifications grouped by channel and user.
+
+        Args:
+            notifications_by_channel: Dict of {channel_id: {jira_name: [issues]}}
+        """
+        if not notifications_by_channel:
+            logger.info("📭 No notifications to send")
+            return
+
+        logger.info(
+            f"\n📬 Sending batched notifications to {len(notifications_by_channel)} channel(s)..."
+        )
+
+        base_url = cls.ACCOUNTS[cls.CURRENT_KEY]["base_url"].rstrip("/")
+
+        for channel_id, users_issues in notifications_by_channel.items():
+            try:
+                logger.info(f"\n📨 Processing channel {channel_id}...")
+
+                # Get channel members
+                user_list = cls.get_all_slack_channel_members(channel_id)
+
+                if not user_list:
+                    logger.warning(f"  ⚠️ No users found in channel {channel_id}")
+                    # Send generic message for all issues
+                    all_issues = []
+                    for issues in users_issues.values():
+                        all_issues.extend(issues)
+
+                    issue_links = [
+                        f"<{base_url}/browse/{iss.key}|{iss.key}>" for iss in all_issues
+                    ]
+                    msg = (
+                        f"*Story Point Update Required*\n\nThe following tickets are missing story point estimates:\n"
+                        + "\n".join([f"• {link}" for link in issue_links])
+                    )
+                    cls.post_to_thread(channel_id, msg)
+                    continue
+
+                slack_names = [u["name"] for u in user_list]
+
+                # Build message parts for each user
+                user_messages = []
+                unassigned_issues = []
+
+                for jira_name, issues in users_issues.items():
+                    # Handle unassigned issues separately
+                    if jira_name == "__NO_ASSIGNEE__":
+                        unassigned_issues.extend(issues)
+                        continue
+
+                    # Fuzzy match Jira name to Slack name
+                    best_match = process.extract(
+                        jira_name, slack_names, scorer=fuzz.WRatio, limit=1
+                    )
+
+                    slack_user_id = None
+                    if best_match and best_match[0][1] > 70:
+                        matched_name = best_match[0][0]
+                        user_data = next(
+                            (u for u in user_list if u["name"] == matched_name), None
+                        )
+                        if user_data:
+                            slack_user_id = user_data["id"]
+
+                    # Build issue list for this user
+                    issue_links = [
+                        f"<{base_url}/browse/{iss.key}|{iss.key}>" for iss in issues
+                    ]
+
+                    if slack_user_id:
+                        # User found in Slack - mention them
+                        if len(issues) == 1:
+                            user_msg = (
+                                f"<@{slack_user_id}> - The following ticket requires story point estimation:\n"
+                                + "\n".join([f"  • {link}" for link in issue_links])
+                            )
+                        else:
+                            user_msg = (
+                                f"<@{slack_user_id}> - The following {len(issues)} tickets require story point estimation:\n"
+                                + "\n".join([f"  • {link}" for link in issue_links])
+                            )
+                        user_messages.append(user_msg)
+                        logger.info(
+                            f"  ✓ Will mention user {jira_name} for {len(issues)} issue(s)"
+                        )
+                    else:
+                        # User not found in Slack - list without mention
+                        if len(issues) == 1:
+                            user_msg = (
+                                f"*{jira_name}* - The following ticket requires story point estimation:\n"
+                                + "\n".join([f"  • {link}" for link in issue_links])
+                            )
+                        else:
+                            user_msg = (
+                                f"*{jira_name}* - The following {len(issues)} tickets require story point estimation:\n"
+                                + "\n".join([f"  • {link}" for link in issue_links])
+                            )
+                        user_messages.append(user_msg)
+                        logger.info(
+                            f"  ⚠️ User {jira_name} not found in Slack, listing {len(issues)} issue(s) without mention"
+                        )
+
+                # Build final message
+                if user_messages or unassigned_issues:
+                    msg_parts = ["📋 *Story Point Estimation Required*\n"]
+
+                    if user_messages:
+                        msg_parts.extend(user_messages)
+
+                    if unassigned_issues:
+                        msg_parts.append("\n*Tickets Without Assignee*")
+                        msg_parts.append(
+                            "The following tickets need to be assigned and estimated:"
+                        )
+                        unassigned_links = [
+                            f"<{base_url}/browse/{iss.key}|{iss.key}>"
+                            for iss in unassigned_issues
+                        ]
+                        msg_parts.extend([f"  • {link}" for link in unassigned_links])
+
+                    final_msg = "\n\n".join(msg_parts)
+                    cls.post_to_thread(channel_id, final_msg)
+
+                    total_issues = sum(len(issues) for issues in users_issues.values())
+                    logger.info(
+                        f"  ✅ Sent batched notification for {total_issues} issue(s) to {len(users_issues)} user(s)"
+                    )
+
+            except Exception as e:
+                logger.error(
+                    f"Error sending batched notification to channel {channel_id}: {e}"
+                )
+
+    @classmethod
     def get_story_point_field_id(cls):
         """
         Dynamically discover Story Points field ID for current account.
@@ -316,7 +510,7 @@ class JiraSlackUtils:
     def getUpComingSprintDetails(cls, sprint_id):
         """
         Use JIRA Python library with correct field ID.
-        Now that we're finding the right field (customfield_10011), this should work!
+        Now collects all issues and sends batched notifications by user.
         """
 
         # Get Story Points field ID dynamically
@@ -355,6 +549,9 @@ class JiraSlackUtils:
             issues_without_sp = []
             issues_with_sp = []
 
+            # Structure: {channel_id: {jira_name: [issue_objects]}}
+            notifications_by_channel = {}
+
             for issue in issues:
                 iss_key = issue.key
 
@@ -373,8 +570,8 @@ class JiraSlackUtils:
                     logger.info(f"  ❌ NEEDS ATTENTION - No story points set")
                     issues_without_sp.append(iss_key)
 
-                    # Send notification
-                    cls._notify_missing_story_points(issue, sp_field_id)
+                    # Collect notification data instead of sending immediately
+                    cls._collect_notification_data(issue, notifications_by_channel)
                 else:
                     logger.info(f"  ✓ Has story points ({story_points})")
                     issues_with_sp.append(iss_key)
@@ -391,6 +588,9 @@ class JiraSlackUtils:
                 logger.info(
                     f"   Issues needing attention: {', '.join(issues_without_sp)}"
                 )
+
+            # Send all batched notifications
+            cls._send_batched_notifications(notifications_by_channel)
 
         except Exception as e:
             logger.error(f"❌ Error processing sprint {sprint_id}: {e}", exc_info=True)
