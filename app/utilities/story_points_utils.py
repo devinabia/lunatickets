@@ -117,6 +117,14 @@ class JiraSlackUtils:
             f = issue.fields
             iss_key = issue.key
 
+            # Ignore bugs - they don't need story points
+            issuetype = getattr(f, "issuetype", None)
+            if issuetype and getattr(issuetype, "name", "").lower() == "bug":
+                logger.debug(
+                    f"  ℹ️ Skipping {iss_key} - Bug tickets don't require story points"
+                )
+                return
+
             # Get channel for this issue
             channel_id = cls.searchInJsonFile(iss_key)
             if channel_id is None:
@@ -535,7 +543,7 @@ class JiraSlackUtils:
                 jql_str=jql,
                 startAt=0,
                 maxResults=False,  # Get all issues
-                fields=f"summary,status,assignee,project,reporter,{sp_field_id}",
+                fields=f"summary,status,assignee,project,reporter,issuetype,{sp_field_id}",
             )
 
             logger.info(f"✓ Found {len(issues)} issues")
